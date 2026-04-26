@@ -60,7 +60,7 @@ install_frps() {
 
   echo -e "\n${CYAN}>>> 开始自定义配置 服务端 (frps) <<<${RESET}"
   
-  read -p "1. 请输入 frps 绑定端口[默认 7000]: " bind_port
+  read -p "1. 请输入 frps 绑定端口 [默认 7000]: " bind_port
   bind_port=${bind_port:-7000}
 
   # 只有服务端需要生成随机 Token 供参考
@@ -76,21 +76,21 @@ install_frps() {
     auth_token=$input_token
   fi
 
-  read -p "3. 是否需要开启 HTTP Web 穿透端口(vhost_http_port)?[y/N]: " enable_vhost
+  read -p "3. 是否需要开启 HTTP Web 穿透端口(vhost_http_port)? [y/N]: " enable_vhost
   if [[ "$enable_vhost" =~ ^[Yy]$ ]]; then
-    read -p "   请输入 HTTP 穿透端口[默认 80]: " vhost_http
+    read -p "   请输入 HTTP 穿透端口 [默认 80]: " vhost_http
     vhost_http=${vhost_http:-80}
     read -p "   请输入 HTTPS 穿透端口 (不需要则留空): " vhost_https
   fi
 
-  read -p "4. 是否开启 Web 管理面板?[y/N]: " enable_dash
+  read -p "4. 是否开启 Web 管理面板? [y/N]: " enable_dash
 
   # 开始生成 frps.toml
   cat > /etc/frp/frps.toml <<EOF
 bindPort = ${bind_port}
 EOF
 
-  if[ -n "$auth_token" ]; then
+  if [ -n "$auth_token" ]; then
     cat >> /etc/frp/frps.toml <<EOF
 auth.method = "token"
 auth.token = "${auth_token}"
@@ -109,11 +109,11 @@ EOF
   fi
 
   if [[ "$enable_dash" =~ ^[Yy]$ ]]; then
-    read -p "   请输入 Web 面板端口[默认 7500]: " dash_port
+    read -p "   请输入 Web 面板端口 [默认 7500]: " dash_port
     dash_port=${dash_port:-7500}
-    read -p "   请输入 Web 面板账号[默认 admin]: " dash_user
+    read -p "   请输入 Web 面板账号 [默认 admin]: " dash_user
     dash_user=${dash_user:-admin}
-    read -p "   请输入 Web 面板密码[默认 admin]: " dash_pwd
+    read -p "   请输入 Web 面板密码 [默认 admin]: " dash_pwd
     dash_pwd=${dash_pwd:-admin}
 
     cat >> /etc/frp/frps.toml <<EOF
@@ -129,7 +129,7 @@ EOF
   echo -e "\n${GREEN}✅ frps 安装并启动成功！${RESET}"
   echo -e "配置文件已保存至: /etc/frp/frps.toml"
   
-  echo -e "\n${CYAN}================ [ 服务端信息摘要 ] =================${RESET}"
+  echo -e "\n${CYAN}================[ 服务端信息摘要 ] =================${RESET}"
   echo -e "服务端 IP : (你的公网IP)"
   echo -e "绑定端口  : ${YELLOW}${bind_port}${RESET}"
   if[ -n "$auth_token" ]; then
@@ -158,7 +158,7 @@ install_frpc() {
     echo -e "${RED}服务端地址不能为空！${RESET}"; exit 1
   fi
   
-  read -p "2. 请输入服务端绑定端口[默认 7000]: " server_port
+  read -p "2. 请输入服务端绑定端口 [默认 7000]: " server_port
   server_port=${server_port:-7000}
 
   # 客户端 Token 配置（仅接受手动输入）
@@ -171,7 +171,7 @@ serverAddr = "${server_addr}"
 serverPort = ${server_port}
 EOF
 
-  if[ -n "$auth_token" ]; then
+  if [ -n "$auth_token" ]; then
     cat >> /etc/frp/frpc.toml <<EOF
 auth.method = "token"
 auth.token = "${auth_token}"
@@ -180,14 +180,14 @@ EOF
 
   echo -e "\n${CYAN}>>> 开始配置穿透规则 (代理) <<<${RESET}"
   while true; do
-    read -p "是否添加一条新的穿透规则?[Y/n] (默认 Y): " add_proxy
+    read -p "是否添加一条新的穿透规则? [Y/n] (默认 Y): " add_proxy
     add_proxy=${add_proxy:-Y}
     if [[ ! "$add_proxy" =~ ^[Yy]$ ]]; then
       break
     fi
 
     echo -e "${YELLOW}请选择协议类型:${RESET} 1) tcp  2) udp  3) http  4) https"
-    read -p "输入数字选择 [默认 1]: " p_type_num
+    read -p "输入数字选择[默认 1]: " p_type_num
     case ${p_type_num:-1} in
       1) p_type="tcp" ;;
       2) p_type="udp" ;;
@@ -216,19 +216,19 @@ localPort = ${local_port}
 EOF
 
     # 根据协议类型要求不同的参数
-    if [ "$p_type" == "tcp" ] ||[ "$p_type" == "udp" ]; then
-      read -p "请输入远端映射端口 (访问公网服务器的该端口) [如 6000]: " remote_port
+    if[ "$p_type" == "tcp" ] || [ "$p_type" == "udp" ]; then
+      read -p "请输入远端映射端口 (访问公网服务器的该端口)[如 6000]: " remote_port
       cat >> /etc/frp/frpc.toml <<EOF
 remotePort = ${remote_port}
 EOF
-    elif[ "$p_type" == "http" ] || [ "$p_type" == "https" ]; then
+    elif [ "$p_type" == "http" ] ||[ "$p_type" == "https" ]; then
       echo -e "${YELLOW}提示: HTTP/HTTPS 协议需服务端配置了 vhost_http(s)_port${RESET}"
       read -p "请输入绑定的自定义域名 (如 www.test.com): " custom_domain
       cat >> /etc/frp/frpc.toml <<EOF
 customDomains = ["${custom_domain}"]
 EOF
     fi
-    echo -e "${GREEN}✅ 规则[${proxy_name}] 添加成功！${RESET}\n"
+    echo -e "${GREEN}✅ 规则 [${proxy_name}] 添加成功！${RESET}\n"
   done
 
   create_systemd "frpc"
@@ -243,7 +243,7 @@ create_systemd() {
   echo "正在配置 systemd 守护进程 (${service_name})..."
   
   local reload_cmd=""
-  if [ "$service_name" == "frpc" ]; then
+  if[ "$service_name" == "frpc" ]; then
     reload_cmd="ExecReload=/usr/local/bin/frpc reload -c /etc/frp/frpc.toml"
   fi
 
@@ -282,7 +282,7 @@ uninstall_frp() {
   systemctl daemon-reload
 
   echo -e "${GREEN}二进制文件及服务已清理。${RESET}"
-  read -p "是否删除配置文件目录 /etc/frp ? [y/N]: " del_conf
+  read -p "是否删除配置文件目录 /etc/frp ?[y/N]: " del_conf
   if [[ "$del_conf" =~ ^[Yy]$ ]]; then
     rm -rf /etc/frp
     echo "配置目录已删除。"
