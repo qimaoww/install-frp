@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2026.04.26-r2"
+SCRIPT_VERSION="2026.04.26-r3"
 FRP_REPO="fatedier/frp"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/frp"
@@ -17,23 +17,23 @@ FRPC_CONFIG="/etc/frp/frpc.toml"
 FRPC_STORE="/etc/frp/frpc-store.json"
 FRP_USER="frp"
 GH_API="https://api.github.com/repos/${FRP_REPO}/releases/latest"
-GH_LATEST_URL="https://github.com/${FRP_REPO}/releases/latest"
 GH_RELEASE_BASE="https://github.com/${FRP_REPO}/releases/download"
 
 # ---------- colors ----------
 if [[ -t 1 ]]; then
-  C_RESET='\033[0m'; C_RED='\033[31m'; C_GREEN='\033[32m'; C_YELLOW='\033[33m'; C_BLUE='\033[34m'; C_BOLD='\033[1m'
+  C_RESET=$'\033[0m'; C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_BLUE=$'\033[34m'; C_BOLD=$'\033[1m'
 else
   C_RESET=''; C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_BOLD=''
 fi
 
-info() { echo -e "${C_BLUE}[INFO]${C_RESET} $*" >&2; }
-ok() { echo -e "${C_GREEN}[OK]${C_RESET} $*" >&2; }
-warn() { echo -e "${C_YELLOW}[WARN]${C_RESET} $*" >&2; }
-err() { echo -e "${C_RED}[ERR]${C_RESET} $*" >&2; }
+info() { printf '%s[INFO]%s %s\n' "$C_BLUE" "$C_RESET" "$*" >&2; }
+ok() { printf '%s[OK]%s %s\n' "$C_GREEN" "$C_RESET" "$*" >&2; }
+warn() { printf '%s[WARN]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+err() { printf '%s[ERR]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
 fatal() { err "$*"; exit 1; }
 
 trap 'err "脚本在第 ${LINENO} 行失败，命令：${BASH_COMMAND}"' ERR
+trap 'printf "\n" >&2; err "已中断。"; exit 130' INT
 
 # ---------- helpers ----------
 need_root() {
@@ -44,7 +44,7 @@ need_root() {
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-pause() { printf '按回车继续...' >&2; read -r _ || true; }
+pause() { read -r -p "按回车继续..." _ || true; }
 
 trim() {
   local s="$*"
@@ -56,12 +56,10 @@ trim() {
 ask() {
   local prompt="$1" default="${2:-}" ans
   if [[ -n "$default" ]]; then
-    printf '%s [%s]: ' "$prompt" "$default" >&2
-    read -r ans || true
+    read -r -p "$prompt [$default]: " ans || true
     printf '%s' "${ans:-$default}"
   else
-    printf '%s: ' "$prompt" >&2
-    read -r ans || true
+    read -r -p "$prompt: " ans || true
     printf '%s' "$ans"
   fi
 }
@@ -79,8 +77,7 @@ ask_required() {
 confirm() {
   local prompt="$1" default="${2:-Y}" ans hint
   if [[ "$default" =~ ^[Yy]$ ]]; then hint="Y/n"; else hint="y/N"; fi
-  printf '%s [%s]: ' "$prompt" "$hint" >&2
-  read -r ans || true
+  read -r -p "$prompt [$hint]: " ans || true
   ans="${ans:-$default}"
   [[ "$ans" =~ ^[Yy]$ ]]
 }
@@ -132,7 +129,7 @@ random_secret() {
 }
 
 print_banner() {
-  clear || true
+  clear 2>/dev/null || true
   cat <<BANNER
 ${C_BOLD}==================================================
        frp 一键安装/管理脚本  ${SCRIPT_VERSION}
@@ -143,7 +140,7 @@ BANNER
 
 install_dependencies() {
   local missing=() c
-  for c in curl tar gzip grep sed awk uname chmod chown mkdir rm cp mv install mktemp date cut head tr id; do
+  for c in curl tar gzip grep sed awk uname chmod chown mkdir rm cp mv; do
     has_cmd "$c" || missing+=("$c")
   done
   # openssl is optional but useful for random token.
@@ -188,13 +185,9 @@ detect_arch() {
 }
 
 get_latest_version() {
-  local tag latest_url
-  tag="$(curl -fsSL --connect-timeout 10 --retry 2 --retry-delay 1 "$GH_API" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(v[0-9][^"]*\)".*/\1/p' | head -n1 || true)"
-  if [[ -z "$tag" ]]; then
-    latest_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' --connect-timeout 10 --retry 2 --retry-delay 1 "$GH_LATEST_URL" 2>/dev/null || true)"
-    tag="${latest_url##*/}"
-  fi
-  [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || fatal "获取 frp 最新版本失败，可以手动输入版本，例如 VERSION=v0.68.1 bash frp.sh"
+  local tag
+  tag="$(curl -fsSL "$GH_API" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(v[0-9][^"]*\)".*/\1/p' | head -n1)"
+  [[ -n "$tag" ]] || fatal "获取 frp 最新版本失败，可以设置 VERSION=v0.xx.x 后重试。"
   printf '%s' "$tag"
 }
 
@@ -254,7 +247,7 @@ download_and_install_frp() {
   rm -rf "$tmpdir"
 
   ok "frp ${version} 已安装到 ${INSTALL_DIR}"
-  "${INSTALL_DIR}/frps" version || true
+  printf "frps: %s\n" "$(frp_version_text "${INSTALL_DIR}/frps")"
 }
 
 ensure_token_file() {
@@ -272,7 +265,6 @@ ensure_token_file() {
 }
 
 write_systemd_service() {
-  has_cmd systemctl || fatal "当前系统没有 systemctl，无法写入 systemd 服务；你可以选择 3 仅安装二进制后手动运行。"
   local name="$1" bin="$2" conf="$3" extra_args="${4:-}" user_line group_line cap_line
   if id "$FRP_USER" >/dev/null 2>&1; then
     user_line="User=${FRP_USER}"
@@ -339,11 +331,20 @@ try_open_firewall_port() {
 }
 
 verify_config() {
-  local bin="$1" conf="$2" unsafe_arg="${3:-}"
+  local bin="$1" conf="$2"
   if [[ -x "$bin" && -f "$conf" ]]; then
     info "校验配置：$bin verify -c $conf"
-    "$bin" verify -c "$conf" ${unsafe_arg:-}
+    "$bin" verify -c "$conf"
   fi
+}
+
+frp_version_text() {
+  local bin="$1" out=""
+  [[ -x "$bin" ]] || return 0
+  out="$("$bin" version 2>/dev/null || true)"
+  [[ -n "$out" ]] || out="$("$bin" -v 2>/dev/null || true)"
+  [[ -n "$out" ]] || out="$("$bin" --version 2>/dev/null || true)"
+  printf '%s' "$out"
 }
 
 # ---------- frps ----------
@@ -599,7 +600,7 @@ append_common_proxy_options() {
   fi
   if [[ "$type" == "tcp" || "$type" == "http" || "$type" == "https" ]]; then
     if confirm "是否添加健康检查" "n"; then
-      if [[ "$type" == "http" ]]; then
+      if [[ "$type" == "http" || "$type" == "https" ]]; then
         hc_type="http"
         hc_path="$(ask "健康检查路径" "/")"
         echo "healthCheck.type = \"http\"" >> "$file"
@@ -631,7 +632,8 @@ EOF_PROXY
 }
 
 add_proxy_http_https() {
-  local type="$1" name="$2" file="$3" local_ip local_port domain_mode domains subdomain locations host_rewrite http_user http_pass
+  local type="$1" name="$2" file="$3" local_ip local_port domain_mode domains subdomain
+  local locations host_rewrite http_user http_pass
   local_ip="$(ask "本地 Web 服务 IP localIP" "127.0.0.1")"
   local_port="$(ask_port "本地 Web 服务端口 localPort" "80")"
   cat > "$file" <<EOF_PROXY
@@ -653,19 +655,23 @@ EOF_PROXY
     echo "subdomain = \"$(toml_escape "$subdomain")\"" >> "$file"
   fi
 
-  locations="$(ask "URL 路由 locations，多个逗号分隔；留空不设置，例如 /api,/static" "")"
-  [[ -n "$locations" ]] && echo "locations = $(toml_array_from_csv "$locations")" >> "$file"
-  host_rewrite="$(ask "Host Header 重写 hostHeaderRewrite，留空不设置" "")"
-  [[ -n "$host_rewrite" ]] && echo "hostHeaderRewrite = \"$(toml_escape "$host_rewrite")\"" >> "$file"
+  # locations / hostHeaderRewrite / httpUser / httpPassword are HTTP-only fields.
+  if [[ "$type" == "http" ]]; then
+    locations="$(ask "URL 路由 locations，多个逗号分隔；留空不设置，例如 /api,/static" "")"
+    [[ -n "$locations" ]] && echo "locations = $(toml_array_from_csv "$locations")" >> "$file"
+    host_rewrite="$(ask "Host Header 重写 hostHeaderRewrite，留空不设置" "")"
+    [[ -n "$host_rewrite" ]] && echo "hostHeaderRewrite = \"$(toml_escape "$host_rewrite")\"" >> "$file"
 
-  if confirm "是否给该 HTTP 代理添加 BasicAuth" "n"; then
-    http_user="$(ask_required "HTTP BasicAuth 用户名" "admin")"
-    http_pass="$(ask "HTTP BasicAuth 密码，留空随机" "")"
-    [[ -z "$http_pass" ]] && http_pass="$(random_secret | cut -c1-16)"
-    echo "httpUser = \"$(toml_escape "$http_user")\"" >> "$file"
-    echo "httpPassword = \"$(toml_escape "$http_pass")\"" >> "$file"
-    ok "HTTP BasicAuth：${http_user} / ${http_pass}"
+    if confirm "是否给该 HTTP 代理添加 BasicAuth" "n"; then
+      http_user="$(ask_required "HTTP BasicAuth 用户名" "admin")"
+      http_pass="$(ask "HTTP BasicAuth 密码，留空随机" "")"
+      [[ -z "$http_pass" ]] && http_pass="$(random_secret | cut -c1-16)"
+      echo "httpUser = \"$(toml_escape "$http_user")\"" >> "$file"
+      echo "httpPassword = \"$(toml_escape "$http_pass")\"" >> "$file"
+      ok "HTTP BasicAuth：${http_user} / ${http_pass}"
+    fi
   fi
+
   append_common_proxy_options "$file" "$type"
 }
 
@@ -742,7 +748,7 @@ add_proxy_wizard() {
   ok "已写入：$file"
 
   verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
-  if has_cmd systemctl && systemctl list-unit-files --type=service frpc.service 2>/dev/null | grep -q '^frpc\.service'; then
+  if systemctl list-unit-files frpc.service >/dev/null 2>&1; then
     if confirm "是否重启 frpc 使配置生效" "Y"; then
       systemctl restart frpc
       systemctl --no-pager --full status frpc || true
@@ -754,8 +760,8 @@ add_proxy_wizard() {
 show_summary() {
   echo
   echo "安装目录：${INSTALL_DIR}"
-  [[ -x "${INSTALL_DIR}/frps" ]] && echo "frps：$(${INSTALL_DIR}/frps version 2>/dev/null || true)"
-  [[ -x "${INSTALL_DIR}/frpc" ]] && echo "frpc：$(${INSTALL_DIR}/frpc version 2>/dev/null || true)"
+  [[ -x "${INSTALL_DIR}/frps" ]] && echo "frps：$(frp_version_text "${INSTALL_DIR}/frps")"
+  [[ -x "${INSTALL_DIR}/frpc" ]] && echo "frpc：$(frp_version_text "${INSTALL_DIR}/frpc")"
   echo "配置目录：${CONFIG_DIR}"
   echo "frps 配置：${FRPS_CONFIG}"
   echo "frpc 配置：${FRPC_CONFIG}"
@@ -769,7 +775,6 @@ show_summary() {
 }
 
 manage_service_menu() {
-  has_cmd systemctl || fatal "当前系统没有 systemctl。"
   local svc action
   echo "服务：1) frps  2) frpc"
   svc="$(ask "请选择" "1")"
@@ -789,21 +794,17 @@ manage_service_menu() {
 }
 
 verify_all_configs() {
-  local found=0
-  if [[ -x "${INSTALL_DIR}/frps" && -f "$FRPS_CONFIG" ]]; then found=1; verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"; fi
-  if [[ -x "${INSTALL_DIR}/frpc" && -f "$FRPC_CONFIG" ]]; then found=1; verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"; fi
-  (( found == 1 )) || warn "未找到可校验的 frps/frpc 配置或二进制。"
+  [[ -x "${INSTALL_DIR}/frps" && -f "$FRPS_CONFIG" ]] && verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"
+  [[ -x "${INSTALL_DIR}/frpc" && -f "$FRPC_CONFIG" ]] && verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
 }
 
 uninstall_frp() {
   warn "即将卸载 frp。"
   if ! confirm "确认继续" "n"; then return; fi
-  if has_cmd systemctl; then
-    systemctl stop frps frpc 2>/dev/null || true
-    systemctl disable frps frpc 2>/dev/null || true
-  fi
+  systemctl stop frps frpc 2>/dev/null || true
+  systemctl disable frps frpc 2>/dev/null || true
   rm -f /etc/systemd/system/frps.service /etc/systemd/system/frpc.service
-  has_cmd systemctl && systemctl daemon-reload 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
   rm -f "${INSTALL_DIR}/frps" "${INSTALL_DIR}/frpc"
   if confirm "是否删除配置目录 ${CONFIG_DIR}" "n"; then
     rm -rf "$CONFIG_DIR"
@@ -846,4 +847,6 @@ MENU
   done
 }
 
-main_menu "$@"
+if [[ "${FRP_LIB_ONLY:-0}" != "1" ]]; then
+  main_menu "$@"
+fi
