@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2026.04.26"
+SCRIPT_VERSION="2026.04.26-r2"
 FRP_REPO="fatedier/frp"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/frp"
@@ -17,6 +17,7 @@ FRPC_CONFIG="/etc/frp/frpc.toml"
 FRPC_STORE="/etc/frp/frpc-store.json"
 FRP_USER="frp"
 GH_API="https://api.github.com/repos/${FRP_REPO}/releases/latest"
+GH_LATEST_URL="https://github.com/${FRP_REPO}/releases/latest"
 GH_RELEASE_BASE="https://github.com/${FRP_REPO}/releases/download"
 
 # ---------- colors ----------
@@ -26,9 +27,9 @@ else
   C_RESET=''; C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_BOLD=''
 fi
 
-info() { echo -e "${C_BLUE}[INFO]${C_RESET} $*"; }
-ok() { echo -e "${C_GREEN}[OK]${C_RESET} $*"; }
-warn() { echo -e "${C_YELLOW}[WARN]${C_RESET} $*"; }
+info() { echo -e "${C_BLUE}[INFO]${C_RESET} $*" >&2; }
+ok() { echo -e "${C_GREEN}[OK]${C_RESET} $*" >&2; }
+warn() { echo -e "${C_YELLOW}[WARN]${C_RESET} $*" >&2; }
 err() { echo -e "${C_RED}[ERR]${C_RESET} $*" >&2; }
 fatal() { err "$*"; exit 1; }
 
@@ -43,7 +44,7 @@ need_root() {
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-pause() { read -r -p "按回车继续..." _ || true; }
+pause() { printf '按回车继续...' >&2; read -r _ || true; }
 
 trim() {
   local s="$*"
@@ -55,10 +56,12 @@ trim() {
 ask() {
   local prompt="$1" default="${2:-}" ans
   if [[ -n "$default" ]]; then
-    read -r -p "$prompt [$default]: " ans || true
+    printf '%s [%s]: ' "$prompt" "$default" >&2
+    read -r ans || true
     printf '%s' "${ans:-$default}"
   else
-    read -r -p "$prompt: " ans || true
+    printf '%s: ' "$prompt" >&2
+    read -r ans || true
     printf '%s' "$ans"
   fi
 }
@@ -76,7 +79,8 @@ ask_required() {
 confirm() {
   local prompt="$1" default="${2:-Y}" ans hint
   if [[ "$default" =~ ^[Yy]$ ]]; then hint="Y/n"; else hint="y/N"; fi
-  read -r -p "$prompt [$hint]: " ans || true
+  printf '%s [%s]: ' "$prompt" "$hint" >&2
+  read -r ans || true
   ans="${ans:-$default}"
   [[ "$ans" =~ ^[Yy]$ ]]
 }
@@ -139,7 +143,7 @@ BANNER
 
 install_dependencies() {
   local missing=() c
-  for c in curl tar gzip grep sed awk uname chmod chown mkdir rm cp mv; do
+  for c in curl tar gzip grep sed awk uname chmod chown mkdir rm cp mv install mktemp date cut head tr id; do
     has_cmd "$c" || missing+=("$c")
   done
   # openssl is optional but useful for random token.
@@ -184,9 +188,13 @@ detect_arch() {
 }
 
 get_latest_version() {
-  local tag
-  tag="$(curl -fsSL "$GH_API" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(v[0-9][^"]*\)".*/\1/p' | head -n1)"
-  [[ -n "$tag" ]] || fatal "获取 frp 最新版本失败，可以设置 VERSION=v0.xx.x 后重试。"
+  local tag latest_url
+  tag="$(curl -fsSL --connect-timeout 10 --retry 2 --retry-delay 1 "$GH_API" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(v[0-9][^"]*\)".*/\1/p' | head -n1 || true)"
+  if [[ -z "$tag" ]]; then
+    latest_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' --connect-timeout 10 --retry 2 --retry-delay 1 "$GH_LATEST_URL" 2>/dev/null || true)"
+    tag="${latest_url##*/}"
+  fi
+  [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || fatal "获取 frp 最新版本失败，可以手动输入版本，例如 VERSION=v0.68.1 bash frp.sh"
   printf '%s' "$tag"
 }
 
@@ -264,6 +272,7 @@ ensure_token_file() {
 }
 
 write_systemd_service() {
+  has_cmd systemctl || fatal "当前系统没有 systemctl，无法写入 systemd 服务；你可以选择 3 仅安装二进制后手动运行。"
   local name="$1" bin="$2" conf="$3" extra_args="${4:-}" user_line group_line cap_line
   if id "$FRP_USER" >/dev/null 2>&1; then
     user_line="User=${FRP_USER}"
@@ -590,7 +599,7 @@ append_common_proxy_options() {
   fi
   if [[ "$type" == "tcp" || "$type" == "http" || "$type" == "https" ]]; then
     if confirm "是否添加健康检查" "n"; then
-      if [[ "$type" == "http" || "$type" == "https" ]]; then
+      if [[ "$type" == "http" ]]; then
         hc_type="http"
         hc_path="$(ask "健康检查路径" "/")"
         echo "healthCheck.type = \"http\"" >> "$file"
@@ -733,7 +742,7 @@ add_proxy_wizard() {
   ok "已写入：$file"
 
   verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
-  if systemctl list-unit-files frpc.service >/dev/null 2>&1; then
+  if has_cmd systemctl && systemctl list-unit-files --type=service frpc.service 2>/dev/null | grep -q '^frpc\.service'; then
     if confirm "是否重启 frpc 使配置生效" "Y"; then
       systemctl restart frpc
       systemctl --no-pager --full status frpc || true
@@ -760,6 +769,7 @@ show_summary() {
 }
 
 manage_service_menu() {
+  has_cmd systemctl || fatal "当前系统没有 systemctl。"
   local svc action
   echo "服务：1) frps  2) frpc"
   svc="$(ask "请选择" "1")"
@@ -779,17 +789,21 @@ manage_service_menu() {
 }
 
 verify_all_configs() {
-  [[ -x "${INSTALL_DIR}/frps" && -f "$FRPS_CONFIG" ]] && verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"
-  [[ -x "${INSTALL_DIR}/frpc" && -f "$FRPC_CONFIG" ]] && verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
+  local found=0
+  if [[ -x "${INSTALL_DIR}/frps" && -f "$FRPS_CONFIG" ]]; then found=1; verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"; fi
+  if [[ -x "${INSTALL_DIR}/frpc" && -f "$FRPC_CONFIG" ]]; then found=1; verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"; fi
+  (( found == 1 )) || warn "未找到可校验的 frps/frpc 配置或二进制。"
 }
 
 uninstall_frp() {
   warn "即将卸载 frp。"
   if ! confirm "确认继续" "n"; then return; fi
-  systemctl stop frps frpc 2>/dev/null || true
-  systemctl disable frps frpc 2>/dev/null || true
+  if has_cmd systemctl; then
+    systemctl stop frps frpc 2>/dev/null || true
+    systemctl disable frps frpc 2>/dev/null || true
+  fi
   rm -f /etc/systemd/system/frps.service /etc/systemd/system/frpc.service
-  systemctl daemon-reload 2>/dev/null || true
+  has_cmd systemctl && systemctl daemon-reload 2>/dev/null || true
   rm -f "${INSTALL_DIR}/frps" "${INSTALL_DIR}/frpc"
   if confirm "是否删除配置目录 ${CONFIG_DIR}" "n"; then
     rm -rf "$CONFIG_DIR"
