@@ -5,11 +5,12 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2026.04.26-r7"
+SCRIPT_VERSION="2026.04.26-r8"
 FRP_REPO="fatedier/frp"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/frp"
 FRPC_CONF_DIR="/etc/frp/frpc.d"
+PRESET_DIR="/etc/frp/presets.d"
 LOG_DIR="/var/log/frp"
 TOKEN_FILE="/etc/frp/token"
 FRPS_CONFIG="/etc/frp/frps.toml"
@@ -292,7 +293,7 @@ select_version() {
 }
 
 create_dirs_and_user() {
-  mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$LOG_DIR"
+  mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$PRESET_DIR" "$LOG_DIR"
 
   if ! id "$FRP_USER" >/dev/null 2>&1; then
     if has_cmd useradd; then
@@ -306,7 +307,7 @@ create_dirs_and_user() {
   if id "$FRP_USER" >/dev/null 2>&1; then
     chown -R root:"$FRP_USER" "$CONFIG_DIR"
     chown -R "$FRP_USER":"$FRP_USER" "$LOG_DIR"
-    chmod 750 "$CONFIG_DIR" "$FRPC_CONF_DIR"
+    chmod 750 "$CONFIG_DIR" "$FRPC_CONF_DIR" "$PRESET_DIR"
   else
     warn "无法创建系统用户 $FRP_USER，将使用 root 运行 systemd 服务。"
   fi
@@ -808,17 +809,423 @@ bindPort = ${bind_port}
 EOF_VISITOR
 }
 
-add_proxy_wizard() {
+safe_filename() {
+  local name="$1"
+  printf '%s' "$name" | sed 's/[^A-Za-z0-9._-]/_/g'
+}
+
+preset_meta_get() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 0
+  awk -v want="$key" '
+    /^#/ {
+      line=$0
+      sub(/^#[[:space:]]*/, "", line)
+      pos=index(line, "=")
+      if (pos == 0) next
+      k=substr(line, 1, pos-1)
+      v=substr(line, pos+1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+      if (k == want) {
+        if (v ~ /^".*"$/) {
+          sub(/^"/, "", v)
+          sub(/"$/, "", v)
+        }
+        print v
+        exit
+      }
+    }
+  ' "$file"
+}
+
+extract_template_vars() {
+  local file="$1" meta var
+  meta="$(preset_meta_get "$file" "vars")"
+  if [[ -n "$meta" ]]; then
+    local oldifs="$IFS"
+    IFS=',' read -r -a arr <<< "$meta"
+    IFS="$oldifs"
+    for var in "${arr[@]}"; do
+      var="$(trim "$var")"
+      [[ -n "$var" ]] && printf '%s\n' "$var"
+    done
+    return 0
+  fi
+  grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}|\{\{[A-Za-z_][A-Za-z0-9_]*\}\}' "$file" 2>/dev/null \
+    | sed -E 's/^\$\{//; s/^\{\{//; s/\}$//; s/\}\}$//' \
+    | awk '!seen[$0]++'
+}
+
+preset_list_files() {
+  find "$PRESET_DIR" -maxdepth 1 -type f \( -name '*.tpl' -o -name '*.toml.tpl' -o -name '*.preset' \) 2>/dev/null | sort
+}
+
+choose_preset_file() {
+  local files=() file idx choice title desc
+  while IFS= read -r file; do files+=("$file"); done < <(preset_list_files)
+  if (( ${#files[@]} == 0 )); then
+    warn "还没有自定义预设。请先在预设管理里创建，目录：$PRESET_DIR"
+    return 1
+  fi
+  echo >&2
+  info "自定义预设列表"
+  idx=1
+  for file in "${files[@]}"; do
+    title="$(preset_meta_get "$file" "name")"
+    desc="$(preset_meta_get "$file" "desc")"
+    [[ -n "$title" ]] || title="$(basename "$file")"
+    if [[ -n "$desc" ]]; then
+      printf '%s) %s - %s\n' "$idx" "$title" "$desc" >&2
+    else
+      printf '%s) %s\n' "$idx" "$title" >&2
+    fi
+    idx=$((idx+1))
+  done
+  echo "0) 返回" >&2
+  choice="$(ask "请选择预设" "1")"
+  [[ "$choice" == "0" || "$choice" =~ ^[Qq]$ ]] && return 1
+  if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#files[@]} )); then
+    SELECTED_PRESET_FILE="${files[$((choice-1))]}"
+    return 0
+  fi
+  warn "无效选择。"
+  return 1
+}
+
+write_rendered_frpc_config() {
+  local output_file="$1" tmpfile="$2"
+  mkdir -p "$FRPC_CONF_DIR"
+  if [[ -f "$output_file" ]]; then
+    if confirm "配置 ${output_file} 已存在，是否覆盖" "n"; then
+      cp -a "$output_file" "${output_file}.bak.$(date +%Y%m%d-%H%M%S)"
+    else
+      return 1
+    fi
+  fi
+  install -m 0640 "$tmpfile" "$output_file"
+  chown root:"$FRP_USER" "$output_file" 2>/dev/null || true
+  ok "已写入：$output_file"
+  verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
+  if systemctl list-unit-files frpc.service >/dev/null 2>&1; then
+    if confirm "是否重启 frpc 使配置生效" "Y"; then
+      systemctl restart frpc
+      systemctl --no-pager --full status frpc || true
+    fi
+  fi
+}
+
+render_custom_preset_to_file() {
+  local preset="$1" out_name safe_name output_file tmpfile content vars=() var def value pattern
+  [[ -f "$preset" ]] || fatal "预设不存在：$preset"
+  echo
+  info "套用自定义预设：$(preset_meta_get "$preset" "name")"
+  while IFS= read -r var; do vars+=("$var"); done < <(extract_template_vars "$preset")
+  content="$(cat "$preset")"
+
+  if (( ${#vars[@]} > 0 )); then
+    echo "需要填写变量：${vars[*]}"
+    for var in "${vars[@]}"; do
+      def="$(preset_meta_get "$preset" "default.${var}")"
+      value="$(ask "${var}" "$def")"
+      value="$(toml_escape "$value")"
+      pattern="\${${var}}"
+      content="${content//$pattern/$value}"
+      pattern="{{${var}}}"
+      content="${content//$pattern/$value}"
+    done
+  else
+    warn "该预设没有声明变量，也没有检测到占位符，将原样写入。"
+  fi
+
+  # Remove preset metadata comments from rendered config, keep normal comments.
+  content="$(printf '%s\n' "$content" | sed -E '/^#[[:space:]]*(frp-manager-preset-v1|name[[:space:]]*=|desc[[:space:]]*=|vars[[:space:]]*=|default\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=)/d')"
+
+  out_name="$(ask "生成到 frpc.d 的文件名，留空用预设文件名" "$(basename "$preset")")"
+  out_name="${out_name%.tpl}"; out_name="${out_name%.toml}"; out_name="${out_name%.preset}"
+  [[ -n "$(trim "$out_name")" ]] || out_name="custom"
+  safe_name="$(safe_filename "$out_name")"
+  output_file="${FRPC_CONF_DIR}/${safe_name}.toml"
+  tmpfile="$(mktemp)"
+  printf '%s\n' "$content" > "$tmpfile"
+
+  echo
+  echo "========== 渲染后的配置预览 =========="
+  cat "$tmpfile"
+  echo "======================================"
+  if confirm "确认写入该配置" "Y"; then
+    write_rendered_frpc_config "$output_file" "$tmpfile"
+  else
+    warn "已取消写入。"
+  fi
+  rm -f "$tmpfile"
+}
+
+paste_until_eof_to_file() {
+  local file="$1" line
+  : > "$file"
+  echo "请粘贴内容，单独输入 EOF 结束："
+  while IFS= read -r line; do
+    [[ "$line" == "EOF" ]] && break
+    printf '%s\n' "$line" >> "$file"
+  done
+}
+
+create_custom_preset() {
+  create_dirs_and_user
+  local preset_id file title desc vars var def tmp body_method
+  echo
+  info "创建自定义 frpc 预设"
+  cat <<'EOF_PRESET_HELP'
+预设不是固定模板，而是你自己维护的 TOML 模板。
+可用占位符：${name} 或 {{name}}
+元数据写在 # 注释里，脚本会读取 vars/default.* 后交互询问。
+EOF_PRESET_HELP
+  preset_id="$(ask_required "预设文件名，例如 ssh-tcp 或 nas-http" "")"
+  preset_id="$(safe_filename "$preset_id")"
+  file="${PRESET_DIR}/${preset_id}.tpl"
+  if [[ -f "$file" ]]; then
+    if ! confirm "预设 ${file} 已存在，是否覆盖" "n"; then
+      return 0
+    fi
+  fi
+  title="$(ask "预设显示名" "$preset_id")"
+  desc="$(ask "预设描述" "")"
+  vars="$(ask "变量列表，英文逗号分隔，例如 name,localIP,localPort,remotePort" "name,localIP,localPort,remotePort")"
+
+  tmp="$(mktemp)"
+  {
+    echo "# frp-manager-preset-v1"
+    echo "# name = \"$(toml_escape "$title")\""
+    [[ -n "$desc" ]] && echo "# desc = \"$(toml_escape "$desc")\""
+    echo "# vars = \"$(toml_escape "$vars")\""
+    local oldifs="$IFS"; IFS=',' read -r -a arr <<< "$vars"; IFS="$oldifs"
+    for var in "${arr[@]}"; do
+      var="$(trim "$var")"
+      [[ -z "$var" ]] && continue
+      def="$(ask "变量 ${var} 的默认值，留空无默认" "")"
+      echo "# default.${var} = \"$(toml_escape "$def")\""
+    done
+    echo
+  } > "$tmp"
+
+  echo "内容输入方式：1) 粘贴完整 TOML 模板  2) 生成最小代理骨架后再编辑"
+  body_method="$(ask "请选择" "1")"
+  if [[ "$body_method" == "2" ]]; then
+    cat >> "$tmp" <<'EOF_MINIMAL_PROXY'
+[[proxies]]
+name = "${name}"
+type = "tcp"
+localIP = "${localIP}"
+localPort = ${localPort}
+remotePort = ${remotePort}
+EOF_MINIMAL_PROXY
+  else
+    paste_until_eof_to_file "${tmp}.body"
+    cat "${tmp}.body" >> "$tmp"
+    rm -f "${tmp}.body"
+  fi
+
+  install -m 0640 "$tmp" "$file"
+  rm -f "$tmp"
+  chown root:"$FRP_USER" "$file" 2>/dev/null || true
+  ok "已创建预设：$file"
+  echo "以后可在菜单中选择该预设，并按变量交互生成 frpc.d/*.toml。"
+}
+
+edit_custom_preset() {
+  create_dirs_and_user
+  local file editor
+  SELECTED_PRESET_FILE=""
+  choose_preset_file || return 0
+  file="$SELECTED_PRESET_FILE"
+  editor="${EDITOR:-}"
+  if [[ -z "$editor" ]]; then
+    if has_cmd nano; then editor="nano"; elif has_cmd vim; then editor="vim"; elif has_cmd vi; then editor="vi"; fi
+  fi
+  if [[ -n "$editor" ]]; then
+    "$editor" "$file"
+  else
+    warn "未找到 nano/vim/vi。改用覆盖粘贴模式。"
+    paste_until_eof_to_file "${file}.new"
+    if confirm "是否用新内容覆盖 ${file}" "Y"; then
+      cp -a "$file" "${file}.bak.$(date +%Y%m%d-%H%M%S)"
+      cat "${file}.new" > "$file"
+    fi
+    rm -f "${file}.new"
+  fi
+  chmod 640 "$file" 2>/dev/null || true
+  chown root:"$FRP_USER" "$file" 2>/dev/null || true
+  ok "预设已保存：$file"
+}
+
+show_custom_preset() {
+  local file
+  SELECTED_PRESET_FILE=""
+  choose_preset_file || return 0
+  file="$SELECTED_PRESET_FILE"
+  echo
+  echo "========== $file =========="
+  cat "$file"
+  echo "======================================"
+}
+
+delete_custom_preset() {
+  local file
+  SELECTED_PRESET_FILE=""
+  choose_preset_file || return 0
+  file="$SELECTED_PRESET_FILE"
+  if confirm "确认删除预设 ${file}" "n"; then
+    rm -f "$file"
+    ok "已删除：$file"
+  fi
+}
+
+import_example_presets() {
+  create_dirs_and_user
+  local file
+  warn "这里导入的是可编辑示例，不会强制你使用固定模板；导入后可以在预设管理中编辑。"
+
+  file="${PRESET_DIR}/tcp-custom.tpl"
+  if [[ ! -f "$file" ]] || confirm "覆盖示例 ${file}" "n"; then
+    cat > "$file" <<'EOF_TCP_PRESET'
+# frp-manager-preset-v1
+# name = "TCP 自定义暴露"
+# desc = "自定义本地 IP/端口和远程端口"
+# vars = "name,localIP,localPort,remotePort"
+# default.name = "ssh"
+# default.localIP = "127.0.0.1"
+# default.localPort = "22"
+# default.remotePort = "6000"
+
+[[proxies]]
+name = "${name}"
+type = "tcp"
+localIP = "${localIP}"
+localPort = ${localPort}
+remotePort = ${remotePort}
+EOF_TCP_PRESET
+  fi
+
+  file="${PRESET_DIR}/http-custom.tpl"
+  if [[ ! -f "$file" ]] || confirm "覆盖示例 ${file}" "n"; then
+    cat > "$file" <<'EOF_HTTP_PRESET'
+# frp-manager-preset-v1
+# name = "HTTP 自定义域名"
+# desc = "自定义域名访问本地 Web 服务"
+# vars = "name,localIP,localPort,domain"
+# default.name = "web"
+# default.localIP = "127.0.0.1"
+# default.localPort = "80"
+# default.domain = "www.example.com"
+
+[[proxies]]
+name = "${name}"
+type = "http"
+localIP = "${localIP}"
+localPort = ${localPort}
+customDomains = ["${domain}"]
+EOF_HTTP_PRESET
+  fi
+
+  file="${PRESET_DIR}/stcp-custom.tpl"
+  if [[ ! -f "$file" ]] || confirm "覆盖示例 ${file}" "n"; then
+    cat > "$file" <<'EOF_STCP_PRESET'
+# frp-manager-preset-v1
+# name = "STCP 安全暴露"
+# desc = "需要 visitor 和相同 secretKey 才能访问"
+# vars = "name,localIP,localPort,secretKey"
+# default.name = "secret-ssh"
+# default.localIP = "127.0.0.1"
+# default.localPort = "22"
+# default.secretKey = "change-me"
+
+[[proxies]]
+name = "${name}"
+type = "stcp"
+secretKey = "${secretKey}"
+localIP = "${localIP}"
+localPort = ${localPort}
+EOF_STCP_PRESET
+  fi
+
+  chown root:"$FRP_USER" "$PRESET_DIR"/*.tpl 2>/dev/null || true
+  chmod 640 "$PRESET_DIR"/*.tpl 2>/dev/null || true
+  ok "示例预设已导入到：$PRESET_DIR。你可以继续编辑它们。"
+}
+
+apply_custom_preset() {
+  create_dirs_and_user
+  [[ -f "$FRPC_CONFIG" ]] || warn "未检测到 $FRPC_CONFIG，建议先安装/配置 frpc。"
+  local file
+  SELECTED_PRESET_FILE=""
+  choose_preset_file || return 0
+  file="$SELECTED_PRESET_FILE"
+  render_custom_preset_to_file "$file"
+}
+
+paste_raw_frpc_toml() {
+  create_dirs_and_user
+  local name safe_name output_file tmpfile
+  name="$(ask_required "生成到 frpc.d 的文件名" "custom")"
+  safe_name="$(safe_filename "$name")"
+  output_file="${FRPC_CONF_DIR}/${safe_name}.toml"
+  tmpfile="$(mktemp)"
+  paste_until_eof_to_file "$tmpfile"
+  echo
+  echo "========== 即将写入的 TOML =========="
+  cat "$tmpfile"
+  echo "======================================"
+  if confirm "确认写入" "Y"; then
+    write_rendered_frpc_config "$output_file" "$tmpfile"
+  else
+    warn "已取消写入。"
+  fi
+  rm -f "$tmpfile"
+}
+
+manage_custom_presets_menu() {
+  while true; do
+    echo
+    info "自定义 frpc 预设管理"
+    echo "预设目录：$PRESET_DIR"
+    cat <<'EOF_PRESET_MENU'
+1) 套用自定义预设生成 frpc.d 配置
+2) 创建自定义预设
+3) 编辑自定义预设
+4) 查看自定义预设
+5) 删除自定义预设
+6) 导入可编辑示例预设
+7) 直接粘贴 TOML 到 frpc.d
+0) 返回
+EOF_PRESET_MENU
+    local choice
+    choice="$(ask "请选择" "1")"
+    case "$choice" in
+      1) apply_custom_preset; pause ;;
+      2) create_custom_preset; pause ;;
+      3) edit_custom_preset; pause ;;
+      4) show_custom_preset; pause ;;
+      5) delete_custom_preset; pause ;;
+      6) import_example_presets; pause ;;
+      7) paste_raw_frpc_toml; pause ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择"; pause ;;
+    esac
+  done
+}
+
+add_proxy_manual_wizard() {
   create_dirs_and_user
   [[ -f "$FRPC_CONFIG" ]] || warn "未检测到 $FRPC_CONFIG，建议先安装/配置 frpc。"
   local type name safe_name file
   echo
-  info "添加 frpc 代理/访问者配置"
+  info "高级手动添加 frpc 代理/访问者配置"
   echo "支持类型：tcp udp http https stcp xtcp sudp stcp-visitor xtcp-visitor sudp-visitor"
   type="$(ask "类型" "tcp")"
   case "$type" in tcp|udp|http|https|stcp|xtcp|sudp|stcp-visitor|xtcp-visitor|sudp-visitor) ;; *) fatal "不支持的类型：$type" ;; esac
   name="$(ask_required "名称 name，必须唯一" "")"
-  safe_name="$(printf '%s' "$name" | sed 's/[^A-Za-z0-9._-]/_/g')"
+  safe_name="$(safe_filename "$name")"
   file="${FRPC_CONF_DIR}/${safe_name}.toml"
 
   if [[ -f "$file" ]]; then
@@ -851,6 +1258,30 @@ add_proxy_wizard() {
   fi
 }
 
+add_proxy_wizard() {
+  while true; do
+    echo
+    info "添加/套用 frpc 客户端配置"
+    cat <<'EOF_ADD_PROXY_MENU'
+1) 套用自定义预设
+2) 管理自定义预设
+3) 高级手动添加代理/访问者
+4) 直接粘贴 TOML 到 frpc.d
+0) 返回
+EOF_ADD_PROXY_MENU
+    local choice
+    choice="$(ask "请选择" "1")"
+    case "$choice" in
+      1) apply_custom_preset; pause ;;
+      2) manage_custom_presets_menu ;;
+      3) add_proxy_manual_wizard; pause ;;
+      4) paste_raw_frpc_toml; pause ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择"; pause ;;
+    esac
+  done
+}
+
 # ---------- management ----------
 show_summary() {
   echo
@@ -861,6 +1292,7 @@ show_summary() {
   echo "frps 配置：${FRPS_CONFIG}"
   echo "frpc 配置：${FRPC_CONFIG}"
   echo "frpc 拆分代理：${FRPC_CONF_DIR}"
+  echo "frpc 自定义预设：${PRESET_DIR}"
   echo "日志目录：${LOG_DIR}"
   echo "脚本日志：${INSTALLER_LOG}"
   load_installer_config
@@ -1249,7 +1681,7 @@ main_menu() {
 1) 安装/更新 frps 服务端
 2) 安装/更新 frpc 客户端
 3) 仅安装/更新 frp 二进制文件
-4) 添加 frpc 代理/访问者
+4) 添加/套用 frpc 配置（自定义预设）
 5) 管理 systemd 服务
 6) 校验配置
 7) 查看当前配置
