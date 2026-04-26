@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2026.04.26-r6"
+SCRIPT_VERSION="2026.04.26-r7"
 FRP_REPO="fatedier/frp"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/frp"
@@ -527,6 +527,7 @@ transport.maxPoolCount = ${max_pool}
 log.to = "${LOG_DIR}/frps.log"
 log.level = "info"
 log.maxDays = 7
+log.disablePrintColor = true
 EOF_FRPS
 
   [[ -n "$kcp_port" ]] && echo "kcpBindPort = ${kcp_port}" >> "$FRPS_CONFIG"
@@ -635,6 +636,7 @@ transport.poolCount = ${pool_count}
 log.to = "${LOG_DIR}/frpc.log"
 log.level = "info"
 log.maxDays = 7
+log.disablePrintColor = true
 EOF_FRPC
 
   [[ -n "$user_name" ]] && echo "user = \"$(toml_escape "$user_name")\"" >> "$FRPC_CONFIG"
@@ -1014,20 +1016,32 @@ show_log_file() {
   echo "----------------------------------------"
   if [[ ! -f "$file" ]]; then
     warn "日志文件不存在：$file"
+    warn "如果刚启用文件日志，请先重启对应服务；如果没有连接/报错，日志也可能暂时为空。"
     return 0
   fi
+  if [[ ! -s "$file" ]]; then
+    warn "日志文件存在但为空：$file"
+    warn "frp 通常在启动、客户端连接、代理访问、错误发生时写日志；没有事件时不会持续刷屏。"
+  fi
   if [[ "$follow" == "true" ]]; then
-    tail -n "$lines" -f "$file" || true
+    tail -n "$lines" -F "$file" || true
   else
     tail -n "$lines" "$file" || true
   fi
 }
 
 show_journal_log() {
-  local service="$1" lines="${2:-200}" follow="${3:-false}"
+  local service="$1" lines="${2:-200}" follow="${3:-false}" file=""
+  case "$service" in
+    frps) file="${LOG_DIR}/frps.log" ;;
+    frpc) file="${LOG_DIR}/frpc.log" ;;
+  esac
   echo
   echo "========== ${service} systemd 日志 =========="
   echo "----------------------------------------"
+  if [[ -n "$file" ]]; then
+    warn "当前脚本默认把 ${service} 业务日志写到文件：${file}；systemd 日志通常只显示服务启动/停止。"
+  fi
   if ! has_cmd journalctl; then
     warn "当前系统没有 journalctl。"
     return 0
@@ -1036,6 +1050,128 @@ show_journal_log() {
     journalctl -u "$service" -n "$lines" -f --no-pager || true
   else
     journalctl -u "$service" -n "$lines" --no-pager || true
+  fi
+}
+
+show_service_log() {
+  local service="$1" lines="${2:-200}" follow="${3:-false}" file="" conf=""
+  case "$service" in
+    frps) file="${LOG_DIR}/frps.log"; conf="$FRPS_CONFIG" ;;
+    frpc) file="${LOG_DIR}/frpc.log"; conf="$FRPC_CONFIG" ;;
+    *) warn "未知服务：$service"; return 0 ;;
+  esac
+
+  echo
+  info "查看 ${service} 综合日志"
+  if [[ -f "$conf" ]]; then
+    local log_to
+    log_to="$(grep -E '^[[:space:]]*log\.to[[:space:]]*=' "$conf" | tail -n1 || true)"
+    if [[ -n "$log_to" ]]; then
+      echo "配置：${log_to}"
+    else
+      warn "${conf} 里没有 log.to，建议选择日志菜单里的“一键修复/启用文件日志”。"
+    fi
+  else
+    warn "配置文件不存在：$conf"
+  fi
+
+  if [[ -f "$file" ]]; then
+    show_log_file "$file" "${service} 文件日志" "$lines" "$follow"
+  else
+    warn "未找到 ${service} 文件日志：$file"
+    warn "下面显示 systemd 日志；如果只看到 Started/Stopped，说明 frp 没有向 stdout 输出业务日志。"
+    show_journal_log "$service" "$lines" "$follow"
+  fi
+}
+
+patch_log_config_file() {
+  local conf="$1" file="$2" title="$3" changed=0
+  [[ -f "$conf" ]] || { warn "配置文件不存在：$conf"; return 0; }
+  cp -a "$conf" "${conf}.bak.$(date +%Y%m%d-%H%M%S)"
+
+  if grep -Eq '^[[:space:]]*log\.to[[:space:]]*=' "$conf"; then
+    sed -i -E "s#^[[:space:]]*log\.to[[:space:]]*=.*#log.to = \"${file}\"#" "$conf"
+  else
+    printf '\n# Logs.\nlog.to = "%s"\n' "$file" >> "$conf"
+  fi
+
+  if grep -Eq '^[[:space:]]*log\.level[[:space:]]*=' "$conf"; then
+    sed -i -E 's#^[[:space:]]*log\.level[[:space:]]*=.*#log.level = "info"#' "$conf"
+  else
+    printf 'log.level = "info"\n' >> "$conf"
+  fi
+
+  if grep -Eq '^[[:space:]]*log\.maxDays[[:space:]]*=' "$conf"; then
+    sed -i -E 's#^[[:space:]]*log\.maxDays[[:space:]]*=.*#log.maxDays = 7#' "$conf"
+  else
+    printf 'log.maxDays = 7\n' >> "$conf"
+  fi
+
+  if grep -Eq '^[[:space:]]*log\.disablePrintColor[[:space:]]*=' "$conf"; then
+    sed -i -E 's#^[[:space:]]*log\.disablePrintColor[[:space:]]*=.*#log.disablePrintColor = true#' "$conf"
+  else
+    printf 'log.disablePrintColor = true\n' >> "$conf"
+  fi
+
+  chown root:"$FRP_USER" "$conf" 2>/dev/null || true
+  chmod 640 "$conf" 2>/dev/null || true
+  ok "已修复 ${title} 日志配置：$conf -> $file"
+}
+
+fix_log_config_menu() {
+  local choice restart_services=()
+  echo
+  info "一键修复/启用文件日志"
+  cat <<'MENU_FIX_LOGS'
+1) 修复 frps 文件日志配置
+2) 修复 frpc 文件日志配置
+3) 两个都修复
+0) 返回
+MENU_FIX_LOGS
+  choice="$(ask "请选择" "3")"
+  mkdir -p "$LOG_DIR"
+  if id "$FRP_USER" >/dev/null 2>&1; then
+    chown -R "$FRP_USER":"$FRP_USER" "$LOG_DIR" 2>/dev/null || true
+  fi
+  chmod 750 "$LOG_DIR" 2>/dev/null || true
+
+  case "$choice" in
+    1|frps)
+      patch_log_config_file "$FRPS_CONFIG" "${LOG_DIR}/frps.log" "frps"
+      touch "${LOG_DIR}/frps.log" 2>/dev/null || true
+      chown "$FRP_USER":"$FRP_USER" "${LOG_DIR}/frps.log" 2>/dev/null || true
+      verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"
+      restart_services+=(frps)
+      ;;
+    2|frpc)
+      patch_log_config_file "$FRPC_CONFIG" "${LOG_DIR}/frpc.log" "frpc"
+      touch "${LOG_DIR}/frpc.log" 2>/dev/null || true
+      chown "$FRP_USER":"$FRP_USER" "${LOG_DIR}/frpc.log" 2>/dev/null || true
+      verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
+      restart_services+=(frpc)
+      ;;
+    3|all|全部)
+      patch_log_config_file "$FRPS_CONFIG" "${LOG_DIR}/frps.log" "frps"
+      patch_log_config_file "$FRPC_CONFIG" "${LOG_DIR}/frpc.log" "frpc"
+      touch "${LOG_DIR}/frps.log" "${LOG_DIR}/frpc.log" 2>/dev/null || true
+      chown "$FRP_USER":"$FRP_USER" "${LOG_DIR}/frps.log" "${LOG_DIR}/frpc.log" 2>/dev/null || true
+      verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"
+      verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
+      restart_services+=(frps frpc)
+      ;;
+    0|q|Q) return 0 ;;
+    *) warn "无效选择"; return 0 ;;
+  esac
+
+  if confirm "是否现在重启相关服务让日志配置生效" "Y"; then
+    local svc
+    for svc in "${restart_services[@]}"; do
+      if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1; then
+        systemctl restart "$svc" || warn "重启 ${svc} 失败，请查看 systemd 状态。"
+      fi
+    done
+  else
+    warn "未重启服务，新的 log.to 要等下次重启后生效。"
   fi
 }
 
@@ -1051,31 +1187,37 @@ show_logs_menu() {
     follow="false"
   fi
   cat <<'MENU_LOGS'
-1) frps systemd 日志
-2) frpc systemd 日志
-3) frps 文件日志 /var/log/frp/frps.log
-4) frpc 文件日志 /var/log/frp/frpc.log
-5) 脚本安装/管理日志 /var/log/frp/installer.log
-6) 全部最近日志
+1) frps 综合日志（推荐）
+2) frpc 综合日志（推荐）
+3) frps systemd 日志
+4) frpc systemd 日志
+5) frps 文件日志 /var/log/frp/frps.log
+6) frpc 文件日志 /var/log/frp/frpc.log
+7) 脚本安装/管理日志 /var/log/frp/installer.log
+8) 全部最近日志
+9) 一键修复/启用文件日志
 0) 返回
 MENU_LOGS
-  choice="$(ask "请选择" "6")"
+  choice="$(ask "请选择" "1")"
   case "$choice" in
-    1|frps-journal) show_journal_log frps "$lines" "$follow" ;;
-    2|frpc-journal) show_journal_log frpc "$lines" "$follow" ;;
-    3|frps-file) show_log_file "${LOG_DIR}/frps.log" "frps 文件日志" "$lines" "$follow" ;;
-    4|frpc-file) show_log_file "${LOG_DIR}/frpc.log" "frpc 文件日志" "$lines" "$follow" ;;
-    5|installer) show_log_file "$INSTALLER_LOG" "脚本安装/管理日志" "$lines" "$follow" ;;
-    6|all|全部)
+    1|frps|frps-all) show_service_log frps "$lines" "$follow" ;;
+    2|frpc|frpc-all) show_service_log frpc "$lines" "$follow" ;;
+    3|frps-journal) show_journal_log frps "$lines" "$follow" ;;
+    4|frpc-journal) show_journal_log frpc "$lines" "$follow" ;;
+    5|frps-file) show_log_file "${LOG_DIR}/frps.log" "frps 文件日志" "$lines" "$follow" ;;
+    6|frpc-file) show_log_file "${LOG_DIR}/frpc.log" "frpc 文件日志" "$lines" "$follow" ;;
+    7|installer) show_log_file "$INSTALLER_LOG" "脚本安装/管理日志" "$lines" "$follow" ;;
+    8|all|全部)
       if [[ "$follow" == "true" ]]; then
         warn "全部日志不支持同时实时跟踪，将显示最近 ${lines} 行。"
       fi
+      show_service_log frps "$lines" "false"
+      show_service_log frpc "$lines" "false"
       show_journal_log frps "$lines" "false"
       show_journal_log frpc "$lines" "false"
-      show_log_file "${LOG_DIR}/frps.log" "frps 文件日志" "$lines" "false"
-      show_log_file "${LOG_DIR}/frpc.log" "frpc 文件日志" "$lines" "false"
       show_log_file "$INSTALLER_LOG" "脚本安装/管理日志" "$lines" "false"
       ;;
+    9|fix|repair) fix_log_config_menu ;;
     0|q|Q) return 0 ;;
     *) warn "无效选择" ;;
   esac
