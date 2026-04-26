@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 检查是否为 root 用户
-if[ "$EUID" -ne 0 ]; then
+if [ "$EUID" -ne 0 ]; then
   echo "请使用 root 用户或 sudo 运行此脚本！"
   exit 1
 fi
@@ -67,9 +67,9 @@ install_frps() {
   RANDOM_TOKEN=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 16)
   echo -e "2. 请配置鉴权 Token (防止服务端被滥用)"
   read -p "[直接回车随机生成: ${YELLOW}${RANDOM_TOKEN}${RESET} | 自定义请直接输入 | 输入 none 禁用]: " input_token
-  if [ -z "$input_token" ]; then
+  if[ -z "$input_token" ]; then
     auth_token=$RANDOM_TOKEN
-  elif [ "$input_token" == "none" ]; then
+  elif[ "$input_token" == "none" ]; then
     auth_token=""
   else
     auth_token=$input_token
@@ -89,7 +89,7 @@ install_frps() {
 bindPort = ${bind_port}
 EOF
 
-  if [ -n "$auth_token" ]; then
+  if[ -n "$auth_token" ]; then
     cat >> /etc/frp/frps.toml <<EOF
 auth.method = "token"
 auth.token = "${auth_token}"
@@ -153,7 +153,7 @@ install_frpc() {
 
   echo -e "\n${CYAN}>>> 开始自定义配置 客户端 (frpc) 基础信息 <<<${RESET}"
   read -p "1. 请输入服务端(公网) IP 或域名: " server_addr
-  if[ -z "$server_addr" ]; then
+  if [ -z "$server_addr" ]; then
     echo -e "${RED}服务端地址不能为空！${RESET}"; exit 1
   fi
   
@@ -179,7 +179,7 @@ EOF
 
   echo -e "\n${CYAN}>>> 开始配置穿透规则 (代理) <<<${RESET}"
   while true; do
-    read -p "是否添加一条新的穿透规则? [Y/n] (默认 Y): " add_proxy
+    read -p "是否添加一条新的穿透规则?[Y/n] (默认 Y): " add_proxy
     add_proxy=${add_proxy:-Y}
     if [[ ! "$add_proxy" =~ ^[Yy]$ ]]; then
       break
@@ -242,7 +242,7 @@ create_systemd() {
   echo "正在配置 systemd 守护进程 (${service_name})..."
   
   local reload_cmd=""
-  if[ "$service_name" == "frpc" ]; then
+  if [ "$service_name" == "frpc" ]; then
     reload_cmd="ExecReload=/usr/local/bin/frpc reload -c /etc/frp/frpc.toml"
   fi
 
