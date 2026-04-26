@@ -33,7 +33,7 @@
 ### 直接运行
 
 ```bash
-bash <(curl -fsSL "https://raw.githubusercontent.com/qimaoww/install-frp/refs/heads/main/frp.sh?t=$RANDOM")
+bash <(curl -fsSL "https://raw.githubusercontent.com/qimaoww/install-frp/refs/heads/main/frp.sh")
 ```
 
 
