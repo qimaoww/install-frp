@@ -67,9 +67,10 @@ install_frps() {
   RANDOM_TOKEN=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 16)
   echo -e "2. 请配置鉴权 Token (防止服务端被滥用)"
   read -p "[直接回车随机生成: ${YELLOW}${RANDOM_TOKEN}${RESET} | 自定义请直接输入 | 输入 none 禁用]: " input_token
-  if[ -z "$input_token" ]; then
+  
+  if [ -z "$input_token" ]; then
     auth_token=$RANDOM_TOKEN
-  elif[ "$input_token" == "none" ]; then
+  elif [ "$input_token" == "none" ]; then
     auth_token=""
   else
     auth_token=$input_token
@@ -82,7 +83,7 @@ install_frps() {
     read -p "   请输入 HTTPS 穿透端口 (不需要则留空): " vhost_https
   fi
 
-  read -p "4. 是否开启 Web 管理面板? [y/N]: " enable_dash
+  read -p "4. 是否开启 Web 管理面板?[y/N]: " enable_dash
 
   # 开始生成 frps.toml
   cat > /etc/frp/frps.toml <<EOF
@@ -100,7 +101,7 @@ EOF
     cat >> /etc/frp/frps.toml <<EOF
 vhostHTTPPort = ${vhost_http}
 EOF
-    if[ -n "$vhost_https" ]; then
+    if [ -n "$vhost_https" ]; then
       cat >> /etc/frp/frps.toml <<EOF
 vhostHTTPSPort = ${vhost_https}
 EOF
@@ -110,7 +111,7 @@ EOF
   if [[ "$enable_dash" =~ ^[Yy]$ ]]; then
     read -p "   请输入 Web 面板端口[默认 7500]: " dash_port
     dash_port=${dash_port:-7500}
-    read -p "   请输入 Web 面板账号 [默认 admin]: " dash_user
+    read -p "   请输入 Web 面板账号[默认 admin]: " dash_user
     dash_user=${dash_user:-admin}
     read -p "   请输入 Web 面板密码[默认 admin]: " dash_pwd
     dash_pwd=${dash_pwd:-admin}
@@ -131,7 +132,7 @@ EOF
   echo -e "\n${CYAN}================ [ 服务端信息摘要 ] =================${RESET}"
   echo -e "服务端 IP : (你的公网IP)"
   echo -e "绑定端口  : ${YELLOW}${bind_port}${RESET}"
-  if [ -n "$auth_token" ]; then
+  if[ -n "$auth_token" ]; then
     echo -e "鉴权 Token: ${YELLOW}${auth_token}${RESET}  <-- 【重要】请在配置客户端时填入此密钥！"
   else
     echo -e "鉴权 Token: ${RED}未开启 (极不推荐，存在被滥用风险)${RESET}"
@@ -170,7 +171,7 @@ serverAddr = "${server_addr}"
 serverPort = ${server_port}
 EOF
 
-  if [ -n "$auth_token" ]; then
+  if[ -n "$auth_token" ]; then
     cat >> /etc/frp/frpc.toml <<EOF
 auth.method = "token"
 auth.token = "${auth_token}"
@@ -215,19 +216,19 @@ localPort = ${local_port}
 EOF
 
     # 根据协议类型要求不同的参数
-    if[ "$p_type" == "tcp" ] || [ "$p_type" == "udp" ]; then
+    if [ "$p_type" == "tcp" ] ||[ "$p_type" == "udp" ]; then
       read -p "请输入远端映射端口 (访问公网服务器的该端口) [如 6000]: " remote_port
       cat >> /etc/frp/frpc.toml <<EOF
 remotePort = ${remote_port}
 EOF
-    elif [ "$p_type" == "http" ] ||[ "$p_type" == "https" ]; then
+    elif[ "$p_type" == "http" ] || [ "$p_type" == "https" ]; then
       echo -e "${YELLOW}提示: HTTP/HTTPS 协议需服务端配置了 vhost_http(s)_port${RESET}"
       read -p "请输入绑定的自定义域名 (如 www.test.com): " custom_domain
       cat >> /etc/frp/frpc.toml <<EOF
 customDomains = ["${custom_domain}"]
 EOF
     fi
-    echo -e "${GREEN}✅ 规则 [${proxy_name}] 添加成功！${RESET}\n"
+    echo -e "${GREEN}✅ 规则[${proxy_name}] 添加成功！${RESET}\n"
   done
 
   create_systemd "frpc"
