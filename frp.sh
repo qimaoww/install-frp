@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2026.04.26-r4"
+SCRIPT_VERSION="2026.04.26-r6"
 FRP_REPO="fatedier/frp"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/frp"
@@ -16,6 +16,7 @@ FRPS_CONFIG="/etc/frp/frps.toml"
 FRPC_CONFIG="/etc/frp/frpc.toml"
 FRPC_STORE="/etc/frp/frpc-store.json"
 INSTALLER_CONFIG="/etc/frp/installer.env"
+INSTALLER_LOG="/var/log/frp/installer.log"
 FRP_USER="frp"
 GH_API="https://api.github.com/repos/${FRP_REPO}/releases/latest"
 GH_RELEASE_BASE="https://github.com/${FRP_REPO}/releases/download"
@@ -28,10 +29,16 @@ else
   C_RESET=''; C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_BOLD=''
 fi
 
-info() { printf '%s[INFO]%s %s\n' "$C_BLUE" "$C_RESET" "$*" >&2; }
-ok() { printf '%s[OK]%s %s\n' "$C_GREEN" "$C_RESET" "$*" >&2; }
-warn() { printf '%s[WARN]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
-err() { printf '%s[ERR]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
+log_event() {
+  local level="$1" msg="$2" ts
+  ts="$(date '+%F %T %z' 2>/dev/null || printf 'unknown-time')"
+  { mkdir -p "$LOG_DIR" && printf '%s [%s] %s\n' "$ts" "$level" "$msg" >> "$INSTALLER_LOG"; } 2>/dev/null || true
+}
+
+info() { log_event "INFO" "$*"; printf '%s[INFO]%s %s\n' "$C_BLUE" "$C_RESET" "$*" >&2; }
+ok() { log_event "OK" "$*"; printf '%s[OK]%s %s\n' "$C_GREEN" "$C_RESET" "$*" >&2; }
+warn() { log_event "WARN" "$*"; printf '%s[WARN]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+err() { log_event "ERR" "$*"; printf '%s[ERR]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
 fatal() { err "$*"; exit 1; }
 
 trap 'err "脚本在第 ${LINENO} 行失败，命令：${BASH_COMMAND}"' ERR
@@ -853,6 +860,7 @@ show_summary() {
   echo "frpc 配置：${FRPC_CONFIG}"
   echo "frpc 拆分代理：${FRPC_CONF_DIR}"
   echo "日志目录：${LOG_DIR}"
+  echo "脚本日志：${INSTALLER_LOG}"
   load_installer_config
   echo "GitHub 下载代理：${GH_PROXY:-直连}"
   echo "脚本配置：${INSTALLER_CONFIG}"
@@ -883,8 +891,194 @@ manage_service_menu() {
 }
 
 verify_all_configs() {
-  [[ -x "${INSTALL_DIR}/frps" && -f "$FRPS_CONFIG" ]] && verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"
-  [[ -x "${INSTALL_DIR}/frpc" && -f "$FRPC_CONFIG" ]] && verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
+  local checked=0
+
+  if [[ -x "${INSTALL_DIR}/frps" && -f "$FRPS_CONFIG" ]]; then
+    verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"
+    checked=1
+  else
+    warn "跳过 frps：未同时检测到 ${INSTALL_DIR}/frps 和 $FRPS_CONFIG。"
+  fi
+
+  if [[ -x "${INSTALL_DIR}/frpc" && -f "$FRPC_CONFIG" ]]; then
+    verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
+    checked=1
+  else
+    warn "跳过 frpc：未同时检测到 ${INSTALL_DIR}/frpc 和 $FRPC_CONFIG。"
+  fi
+
+  if (( checked == 0 )); then
+    warn "没有可校验的 frp 配置。"
+  else
+    ok "配置校验完成。"
+  fi
+}
+
+redact_config_stream() {
+  sed -E \
+    -e 's#(auth\.token[[:space:]]*=[[:space:]]*").*(")#\1******\2#g' \
+    -e 's#(token[[:space:]]*=[[:space:]]*").*(")#\1******\2#g' \
+    -e 's#(secretKey[[:space:]]*=[[:space:]]*").*(")#\1******\2#g' \
+    -e 's#(webServer\.password[[:space:]]*=[[:space:]]*").*(")#\1******\2#g' \
+    -e 's#(httpPassword[[:space:]]*=[[:space:]]*").*(")#\1******\2#g' \
+    -e 's#(password[[:space:]]*=[[:space:]]*").*(")#\1******\2#g' \
+    -e 's#(GH_PROXY=).+#\1******#g'
+}
+
+show_config_file() {
+  local file="$1" title="$2" reveal="$3"
+  echo
+  echo "========== ${title} =========="
+  if [[ ! -f "$file" ]]; then
+    warn "文件不存在：$file"
+    return 0
+  fi
+  echo "路径：$file"
+  echo "----------------------------------------"
+  if [[ "$reveal" == "true" ]]; then
+    nl -ba "$file"
+  else
+    redact_config_stream < "$file" | nl -ba
+  fi
+}
+
+show_token_file() {
+  local reveal="$1"
+  echo
+  echo "========== 鉴权 Token 文件 =========="
+  if [[ ! -f "$TOKEN_FILE" ]]; then
+    warn "文件不存在：$TOKEN_FILE"
+    return 0
+  fi
+  echo "路径：$TOKEN_FILE"
+  echo "----------------------------------------"
+  if [[ "$reveal" == "true" ]]; then
+    nl -ba "$TOKEN_FILE"
+  else
+    printf '     1	******
+'
+  fi
+}
+
+show_frpc_split_configs() {
+  local reveal="$1" files=() f
+  echo
+  echo "========== frpc 拆分代理配置 =========="
+  echo "目录：$FRPC_CONF_DIR"
+  if [[ ! -d "$FRPC_CONF_DIR" ]]; then
+    warn "目录不存在：$FRPC_CONF_DIR"
+    return 0
+  fi
+  while IFS= read -r -d '' f; do
+    files+=("$f")
+  done < <(find "$FRPC_CONF_DIR" -maxdepth 1 -type f -name '*.toml' -print0 2>/dev/null | sort -z)
+  if (( ${#files[@]} == 0 )); then
+    warn "没有找到拆分代理配置：${FRPC_CONF_DIR}/*.toml"
+    return 0
+  fi
+  for f in "${files[@]}"; do
+    show_config_file "$f" "$(basename "$f")" "$reveal"
+  done
+}
+
+show_current_configs() {
+  local choice reveal="true"
+  echo
+  info "查看当前配置"
+  warn "当前配置会直接显示 token / password / secretKey / GH_PROXY 等明文，请勿公开截图或粘贴。"
+  cat <<'MENU_CONFIG'
+1) 查看 frps.toml
+2) 查看 frpc.toml
+3) 查看 frpc.d 拆分代理配置
+4) 查看 token / installer.env
+5) 查看全部配置
+0) 返回
+MENU_CONFIG
+  choice="$(ask "请选择" "5")"
+  case "$choice" in
+    1|frps) show_config_file "$FRPS_CONFIG" "frps 主配置" "$reveal" ;;
+    2|frpc) show_config_file "$FRPC_CONFIG" "frpc 主配置" "$reveal" ;;
+    3|frpc.d|proxy|proxies) show_frpc_split_configs "$reveal" ;;
+    4|token|installer) show_token_file "$reveal"; show_config_file "$INSTALLER_CONFIG" "脚本配置 installer.env" "$reveal" ;;
+    5|all|全部) show_config_file "$FRPS_CONFIG" "frps 主配置" "$reveal"; show_config_file "$FRPC_CONFIG" "frpc 主配置" "$reveal"; show_frpc_split_configs "$reveal"; show_token_file "$reveal"; show_config_file "$INSTALLER_CONFIG" "脚本配置 installer.env" "$reveal" ;;
+    0|q|Q) return 0 ;;
+    *) warn "无效选择" ;;
+  esac
+}
+
+show_log_file() {
+  local file="$1" title="$2" lines="${3:-200}" follow="${4:-false}"
+  echo
+  echo "========== ${title} =========="
+  echo "路径：$file"
+  echo "----------------------------------------"
+  if [[ ! -f "$file" ]]; then
+    warn "日志文件不存在：$file"
+    return 0
+  fi
+  if [[ "$follow" == "true" ]]; then
+    tail -n "$lines" -f "$file" || true
+  else
+    tail -n "$lines" "$file" || true
+  fi
+}
+
+show_journal_log() {
+  local service="$1" lines="${2:-200}" follow="${3:-false}"
+  echo
+  echo "========== ${service} systemd 日志 =========="
+  echo "----------------------------------------"
+  if ! has_cmd journalctl; then
+    warn "当前系统没有 journalctl。"
+    return 0
+  fi
+  if [[ "$follow" == "true" ]]; then
+    journalctl -u "$service" -n "$lines" -f --no-pager || true
+  else
+    journalctl -u "$service" -n "$lines" --no-pager || true
+  fi
+}
+
+show_logs_menu() {
+  local choice lines follow
+  echo
+  info "查看日志"
+  lines="$(ask_port "显示最近多少行" "200")"
+  if confirm "是否实时跟踪日志" "n"; then
+    follow="true"
+    warn "实时跟踪模式下按 Ctrl+C 返回/退出。"
+  else
+    follow="false"
+  fi
+  cat <<'MENU_LOGS'
+1) frps systemd 日志
+2) frpc systemd 日志
+3) frps 文件日志 /var/log/frp/frps.log
+4) frpc 文件日志 /var/log/frp/frpc.log
+5) 脚本安装/管理日志 /var/log/frp/installer.log
+6) 全部最近日志
+0) 返回
+MENU_LOGS
+  choice="$(ask "请选择" "6")"
+  case "$choice" in
+    1|frps-journal) show_journal_log frps "$lines" "$follow" ;;
+    2|frpc-journal) show_journal_log frpc "$lines" "$follow" ;;
+    3|frps-file) show_log_file "${LOG_DIR}/frps.log" "frps 文件日志" "$lines" "$follow" ;;
+    4|frpc-file) show_log_file "${LOG_DIR}/frpc.log" "frpc 文件日志" "$lines" "$follow" ;;
+    5|installer) show_log_file "$INSTALLER_LOG" "脚本安装/管理日志" "$lines" "$follow" ;;
+    6|all|全部)
+      if [[ "$follow" == "true" ]]; then
+        warn "全部日志不支持同时实时跟踪，将显示最近 ${lines} 行。"
+      fi
+      show_journal_log frps "$lines" "false"
+      show_journal_log frpc "$lines" "false"
+      show_log_file "${LOG_DIR}/frps.log" "frps 文件日志" "$lines" "false"
+      show_log_file "${LOG_DIR}/frpc.log" "frpc 文件日志" "$lines" "false"
+      show_log_file "$INSTALLER_LOG" "脚本安装/管理日志" "$lines" "false"
+      ;;
+    0|q|Q) return 0 ;;
+    *) warn "无效选择" ;;
+  esac
 }
 
 uninstall_frp() {
@@ -916,9 +1110,11 @@ main_menu() {
 4) 添加 frpc 代理/访问者
 5) 管理 systemd 服务
 6) 校验配置
-7) 查看安装摘要
-8) 卸载 frp
-9) 配置 GitHub 下载代理
+7) 查看当前配置
+8) 查看日志
+9) 查看安装摘要
+10) 卸载 frp
+11) 配置 GitHub 下载代理
 0) 退出
 MENU
     local choice
@@ -930,9 +1126,11 @@ MENU
       4) add_proxy_wizard; pause ;;
       5) manage_service_menu; pause ;;
       6) verify_all_configs; pause ;;
-      7) show_summary; pause ;;
-      8) uninstall_frp; pause ;;
-      9) configure_github_proxy; pause ;;
+      7) show_current_configs; pause ;;
+      8) show_logs_menu; pause ;;
+      9) show_summary; pause ;;
+      10) uninstall_frp; pause ;;
+      11) configure_github_proxy; pause ;;
       0|q|Q) exit 0 ;;
       *) warn "无效选择"; pause ;;
     esac
