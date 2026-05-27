@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r2}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r3}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/frp}"
@@ -647,12 +647,26 @@ render_component_status() {
   printf '%s: %s/%s/%s' "$name" "$version" "$config_state" "$service_state"
 }
 
+service_brief_label() {
+  local service="$1" active=""
+  if ! has_cmd systemctl || ! systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
+    printf '未运行'
+    return 0
+  fi
+  active="$(systemctl is-active "$service" 2>/dev/null || true)"
+  case "$active" in
+    active) printf '运行中' ;;
+    failed) printf '异常' ;;
+    *) printf '未运行' ;;
+  esac
+}
+
 render_status_bar() {
   local instance_count
   instance_count="$(list_frpc_instances 2>/dev/null | wc -l | tr -d '[:space:]')"
-  printf '状态：%s | %s | 实例:%s\n' \
-    "$(render_component_status "frps" "${INSTALL_DIR}/frps" "$FRPS_CONFIG" "frps")" \
-    "$(render_component_status "frpc" "${INSTALL_DIR}/frpc" "$FRPC_CONFIG" "frpc")" \
+  printf '状态：服务端:%s | 客户端:%s | 实例:%s\n' \
+    "$(service_brief_label frps)" \
+    "$(service_brief_label frpc)" \
     "$instance_count"
 }
 
@@ -2775,11 +2789,11 @@ uninstall_frp() {
 
 render_main_menu() {
   cat <<'MENU_MAIN'
-1) frps 服务端
-2) frpc 客户端
-3) 配置管理
-4) 日志查看
-5) 工具/维护
+1) 服务端
+2) 客户端
+3) 配置
+4) 日志
+5) 工具
 0) 退出
 MENU_MAIN
 }
