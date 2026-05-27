@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.28-r22}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.28-r23}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -895,14 +895,49 @@ service_brief_label() {
   esac
 }
 
+frpc_instance_status_counts() {
+  local instances=() name service active total running=0 failed=0
+  mapfile -t instances < <(list_frpc_instances)
+  total="${#instances[@]}"
+  if has_cmd systemctl; then
+    for name in "${instances[@]}"; do
+      service="$(instance_service_name "$name")" || continue
+      service_exists "$service" || continue
+      active="$(systemctl is-active "$service" 2>/dev/null || true)"
+      case "$active" in
+        active) running=$((running + 1)) ;;
+        failed) failed=$((failed + 1)) ;;
+      esac
+    done
+  fi
+  printf '%s %s %s\n' "$total" "$running" "$failed"
+}
+
+ui_instance_state() {
+  local total="$1" running="$2" failed="$3" label color="$C_DIM"
+  label="${total}个/运行${running}"
+  (( failed > 0 )) && label="${label}/异常${failed}"
+  if (( failed > 0 )); then
+    color="$C_RED"
+  elif (( running > 0 )); then
+    color="$C_GREEN"
+  elif (( total > 0 )); then
+    color="$C_YELLOW"
+  fi
+  printf '%s%s%s' "$color" "$label" "$C_RESET"
+}
+
 render_status_bar() {
-  local instance_count
-  instance_count="$(list_frpc_instances 2>/dev/null | wc -l | tr -d '[:space:]')"
-  printf '%s状态：%s 服务端:%s | 客户端:%s | 实例:%s%s%s\n' \
+  local instance_count instance_running instance_failed
+  IFS=' ' read -r instance_count instance_running instance_failed < <(frpc_instance_status_counts)
+  instance_count="${instance_count:-0}"
+  instance_running="${instance_running:-0}"
+  instance_failed="${instance_failed:-0}"
+  printf '%s状态：%s 服务端:%s | 默认客户端:%s | 命名实例:%s\n' \
     "$C_BOLD" "$C_RESET" \
     "$(ui_state "$(service_brief_label frps)")" \
     "$(ui_state "$(service_brief_label frpc)")" \
-    "$C_MAGENTA" "$instance_count" "$C_RESET"
+    "$(ui_instance_state "$instance_count" "$instance_running" "$instance_failed")"
 }
 
 validate_instance_name() {

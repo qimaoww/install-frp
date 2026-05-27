@@ -997,6 +997,8 @@ test_install_state_and_status_bar() {
   require_function should_skip_frp_download
   require_function render_component_status
   require_function render_status_bar
+  require_function frpc_instance_status_counts
+  require_function ui_instance_state
   require_function resolve_default_version
   require_function render_main_menu
   require_function render_frps_menu
@@ -1052,14 +1054,63 @@ EOF_FAKE_FRPC_RESTORE
   [[ "$frps_status" == *"frps: v0.68.1"* ]] || fail "frps status missing version: ${frps_status}"
   [[ "$frps_status" == *"已配置"* ]] || fail "frps status missing config state: ${frps_status}"
 
-  status_bar="$(render_status_bar)"
+  status_bar="$(
+    (
+      FRPC_CLIENTS_DIR="${TMP_DIR}/status-bar-none"
+      mkdir -p "$FRPC_CLIENTS_DIR"
+      has_cmd() { [[ "$1" == "systemctl" ]]; }
+      service_exists() { return 1; }
+      systemctl() { printf 'inactive\n'; }
+      render_status_bar
+    )
+  )"
   [[ "$status_bar" == *"状态："* ]] || fail "status bar missing title"
   [[ "$status_bar" == *"服务端:未运行"* ]] || fail "status bar missing server summary: ${status_bar}"
-  [[ "$status_bar" == *"客户端:未运行"* ]] || fail "status bar missing client summary: ${status_bar}"
-  [[ "$status_bar" =~ 实例:[0-9]+ ]] || fail "status bar missing instance count: ${status_bar}"
+  [[ "$status_bar" == *"默认客户端:未运行"* ]] || fail "status bar missing default client summary: ${status_bar}"
+  [[ "$status_bar" == *"命名实例:0个/运行0"* ]] || fail "status bar missing empty instance summary: ${status_bar}"
   [[ "$status_bar" != *"v0."* ]] || fail "main status should not show detailed versions: ${status_bar}"
   [[ "$status_bar" != *"已配置"* ]] || fail "main status should not show config details: ${status_bar}"
   [[ "$(printf '%s\n' "$status_bar" | wc -l | tr -d '[:space:]')" == "1" ]] || fail "status bar should be one line"
+
+  status_bar="$(
+    (
+      FRPC_CLIENTS_DIR="${TMP_DIR}/status-bar-running"
+      mkdir -p "${FRPC_CLIENTS_DIR}/home"
+      printf 'serverPort = 7000\n' > "${FRPC_CLIENTS_DIR}/home/frpc.toml"
+      has_cmd() { [[ "$1" == "systemctl" ]]; }
+      service_exists() { [[ "$1" == "frpc@home" ]]; }
+      systemctl() {
+        if [[ "$1" == "is-active" && "$2" == "frpc@home" ]]; then
+          printf 'active\n'
+        else
+          printf 'inactive\n'
+        fi
+      }
+      render_status_bar
+    )
+  )"
+  [[ "$status_bar" == *"默认客户端:未运行"* ]] || fail "running instance status should keep default client separate: ${status_bar}"
+  [[ "$status_bar" == *"命名实例:1个/运行1"* ]] || fail "status bar should show running named instances: ${status_bar}"
+
+  status_bar="$(
+    (
+      FRPC_CLIENTS_DIR="${TMP_DIR}/status-bar-failed"
+      mkdir -p "${FRPC_CLIENTS_DIR}/home" "${FRPC_CLIENTS_DIR}/edge"
+      printf 'serverPort = 7000\n' > "${FRPC_CLIENTS_DIR}/home/frpc.toml"
+      printf 'serverPort = 7000\n' > "${FRPC_CLIENTS_DIR}/edge/frpc.toml"
+      has_cmd() { [[ "$1" == "systemctl" ]]; }
+      service_exists() { [[ "$1" == frpc@* ]]; }
+      systemctl() {
+        case "$2" in
+          frpc@home) printf 'active\n' ;;
+          frpc@edge) printf 'failed\n' ;;
+          *) printf 'inactive\n' ;;
+        esac
+      }
+      render_status_bar
+    )
+  )"
+  [[ "$status_bar" == *"命名实例:2个/运行1/异常1"* ]] || fail "status bar should show failed named instances: ${status_bar}"
 
   local menu
   menu="$(render_main_menu)"
