@@ -358,6 +358,12 @@ EOF_FAKE_FRPC_RESTORE
   assert_contains "'pa ss'\\''word'" <(printf '%s\n' "$import_cmd") "one-click command quotes passphrase"
   declare -f export_frps_pairing_code | grep -Fq 'render_one_click_import_command "frps"' || fail "frps export should print one-click import command"
   declare -f create_xtcp_exposed_and_code | grep -Fq 'render_one_click_import_command "xtcp"' || fail "xtcp export should print one-click import command"
+
+  local restart_output
+  if ! restart_output="$( ( has_cmd() { return 1; }; restart_service_if_present frpc ) 2>&1 )"; then
+    fail "restart_service_if_present should not fail under set -u when prompt is omitted: ${restart_output}"
+  fi
+  assert_contains '无法重启 frpc' <(printf '%s\n' "$restart_output") "restart helper handles omitted prompt"
 }
 
 main() {

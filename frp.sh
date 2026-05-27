@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r7}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r8}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/refs/heads/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -620,7 +620,9 @@ print_service_summary() {
 }
 
 restart_service_if_present() {
-  local service="$1" prompt="${2:-是否重启 ${service} 使配置生效}" default="${3:-Y}"
+  local service="$1" prompt default
+  prompt="${2:-是否重启 ${service} 使配置生效}"
+  default="${3:-Y}"
   if ! has_cmd systemctl; then
     warn "当前系统没有 systemctl，无法重启 ${service}。"
     return 0
