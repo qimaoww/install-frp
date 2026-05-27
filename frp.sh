@@ -660,7 +660,9 @@ service_action() {
 
   case "$action" in
     start|stop|restart|enable|disable)
-      [[ "$show_summary" == "true" ]] && print_service_summary "$service"
+      if [[ "$show_summary" == "true" ]]; then
+        print_service_summary "$service"
+      fi
       ;;
   esac
 }

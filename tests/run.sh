@@ -400,6 +400,19 @@ EOF_FAKE_FRPC_RESTORE
     fail "restart_service_if_present should not fail under set -u when prompt is omitted: ${restart_output}"
   fi
   assert_contains '无法重启 frpc' <(printf '%s\n' "$restart_output") "restart helper handles omitted prompt"
+
+  local service_output
+  if ! service_output="$( (
+    has_cmd() { [[ "$1" == "systemctl" ]]; }
+    service_exists() { return 0; }
+    systemctl() { return 0; }
+    print_service_summary() { printf 'unexpected summary\n'; }
+    service_action frpc restart false
+  ) 2>&1 )"; then
+    fail "service action should not fail when summary is suppressed: ${service_output}"
+  fi
+  [[ -z "$service_output" ]] || fail "service action should not print summary when suppressed: ${service_output}"
+  pass "service action handles suppressed summary"
 }
 
 main() {
