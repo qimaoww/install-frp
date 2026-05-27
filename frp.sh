@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r6}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r7}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/refs/heads/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -1402,7 +1402,7 @@ parse_xtcp_payload_value() {
 
 write_xtcp_exposed_config() {
   local file="$1" proxy_name="$2" secret="$3" local_ip="$4" local_port="$5"
-  local fallback="${6:-false}" fallback_proxy_name="${7:-}"
+  local fallback="${6:-false}" fallback_proxy_name="${7:-}" disable_assisted_addrs="${8:-false}"
   mkdir -p "${file%/*}"
   cat > "$file" <<EOF_XTCP_EXPOSED
 [[proxies]]
@@ -1412,6 +1412,14 @@ secretKey = "$(toml_escape "$secret")"
 localIP = "$(toml_escape "$local_ip")"
 localPort = ${local_port}
 EOF_XTCP_EXPOSED
+
+  if [[ "$disable_assisted_addrs" == "true" ]]; then
+    cat >> "$file" <<EOF_XTCP_PROXY_NAT
+
+[proxies.natTraversal]
+disableAssistedAddrs = true
+EOF_XTCP_PROXY_NAT
+  fi
 
   if [[ "$fallback" == "true" ]]; then
     cat >> "$file" <<EOF_XTCP_STCP
@@ -1495,6 +1503,89 @@ EOF_XTCP_NAT
   chmod 640 "$file" 2>/dev/null || true
 }
 
+tune_xtcp_config_file() {
+  local file="$1" protocol="${2:-kcp}" disable_assisted_addrs="${3:-true}" fallback_timeout_ms="${4:-5000}" tmp
+  [[ -f "$file" ]] || fatal "配置文件不存在：$file"
+  case "$protocol" in quic|kcp) ;; *) protocol="kcp" ;; esac
+  [[ "$fallback_timeout_ms" =~ ^[0-9]+$ ]] || fallback_timeout_ms=5000
+  [[ "$disable_assisted_addrs" == "true" ]] || disable_assisted_addrs="false"
+
+  tmp="$(mktemp)"
+  awk -v protocol="$protocol" -v disable="$disable_assisted_addrs" -v timeout="$fallback_timeout_ms" '
+    function reset_block() {
+      n = 0
+      kind = ""
+      is_xtcp = 0
+    }
+    function push(line) {
+      lines[++n] = line
+    }
+    function flush_block(    i,line,skip_nat) {
+      if (n == 0) return
+      if (!is_xtcp) {
+        for (i = 1; i <= n; i++) print lines[i]
+        reset_block()
+        return
+      }
+      skip_nat = 0
+      for (i = 1; i <= n; i++) {
+        line = lines[i]
+        if (line ~ /^[[:space:]]*\[(visitors|proxies)\.natTraversal\][[:space:]]*$/) {
+          skip_nat = 1
+          continue
+        }
+        if (skip_nat && line ~ /^[[:space:]]*disableAssistedAddrs[[:space:]]*=/) {
+          continue
+        }
+        if (skip_nat && line ~ /^[[:space:]]*\[/) {
+          skip_nat = 0
+        }
+        if (kind == "visitors" && line ~ /^[[:space:]]*protocol[[:space:]]*=/) continue
+        if (kind == "visitors" && line ~ /^[[:space:]]*fallbackTimeoutMs[[:space:]]*=/) continue
+        print line
+        if (kind == "visitors" && line ~ /^[[:space:]]*type[[:space:]]*=[[:space:]]*"xtcp"/) {
+          print "protocol = \"" protocol "\""
+        }
+        if (kind == "visitors" && line ~ /^[[:space:]]*fallbackTo[[:space:]]*=/) {
+          print "fallbackTimeoutMs = " timeout
+        }
+      }
+      if (disable == "true") {
+        print ""
+        if (kind == "visitors") {
+          print "[visitors.natTraversal]"
+        } else if (kind == "proxies") {
+          print "[proxies.natTraversal]"
+        }
+        print "disableAssistedAddrs = true"
+      }
+      reset_block()
+    }
+    BEGIN { reset_block() }
+    /^[[:space:]]*\[\[visitors\]\][[:space:]]*$/ {
+      flush_block()
+      kind = "visitors"
+      push($0)
+      next
+    }
+    /^[[:space:]]*\[\[proxies\]\][[:space:]]*$/ {
+      flush_block()
+      kind = "proxies"
+      push($0)
+      next
+    }
+    {
+      push($0)
+      if (kind != "" && $0 ~ /^[[:space:]]*type[[:space:]]*=[[:space:]]*"xtcp"/) is_xtcp = 1
+    }
+    END { flush_block() }
+  ' "$file" > "$tmp"
+  cp "$tmp" "$file"
+  rm -f "$tmp"
+  chown root:"$FRP_USER" "$file" 2>/dev/null || true
+  chmod 640 "$file" 2>/dev/null || true
+}
+
 select_frpc_split_dir_for_write() {
   local target name
   echo "写入目标：1) 默认 frpc  2) 命名 frpc 实例"
@@ -1550,7 +1641,7 @@ create_xtcp_exposed_and_code() {
       return 0
     fi
   fi
-  write_xtcp_exposed_config "$file" "$name" "$secret" "$local_ip" "$local_port" "$fallback" "$fallback_proxy"
+  write_xtcp_exposed_config "$file" "$name" "$secret" "$local_ip" "$local_port" "$fallback" "$fallback_proxy" "$disable_assisted"
   verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"
 
   payload="$(render_xtcp_payload "$server_addr" "$server_port" "$name" "${name}_visitor" "$secret" "$bind_addr" "$bind_port" "$keep_open" "$fallback" "$fallback_proxy" "$fallback_visitor" "$timeout" "$protocol" "$disable_assisted")"
@@ -1599,6 +1690,24 @@ import_xtcp_code_to_visitor() {
   ok "已导入 XTCP 访问端配置：$file"
 }
 
+repair_xtcp_config_menu() {
+  create_dirs_and_user
+  local protocol disable_assisted timeout
+  select_frpc_split_dir_for_write || return 0
+  choose_frpc_split_config "$SELECTED_FRPC_SPLIT_DIR" || return 0
+  protocol="$(ask "XTCP 底层协议 quic/kcp；QUIC 超时建议 kcp" "kcp")"
+  case "$protocol" in quic|kcp) ;; *) warn "未知协议，回退 kcp"; protocol="kcp" ;; esac
+  disable_assisted="$(ask_yes_no_value "禁用辅助地址；日志里有 10.x/100.64/172.x 建议启用" "Y")"
+  timeout="$(ask "fallbackTimeoutMs" "5000")"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=5000
+
+  backup_file "$SELECTED_CONFIG_FILE" >/dev/null || true
+  tune_xtcp_config_file "$SELECTED_CONFIG_FILE" "$protocol" "$disable_assisted" "$timeout"
+  verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"
+  restart_service_if_present "$SELECTED_FRPC_SERVICE"
+  ok "已修复 XTCP 配置：$SELECTED_CONFIG_FILE"
+}
+
 xtcp_pair_menu() {
   while true; do
     echo
@@ -1606,6 +1715,7 @@ xtcp_pair_menu() {
     cat <<'MENU_XTCP_CODE'
 1) 创建被访问端 XTCP 配置并生成加密导入码
 2) 粘贴加密导入码生成访问端配置
+3) 修复现有 XTCP 配置
 0) 返回
 MENU_XTCP_CODE
     local choice
@@ -1613,6 +1723,7 @@ MENU_XTCP_CODE
     case "$choice" in
       1) create_xtcp_exposed_and_code; pause ;;
       2) import_xtcp_code_to_visitor; pause ;;
+      3) repair_xtcp_config_menu; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac

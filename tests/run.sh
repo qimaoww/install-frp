@@ -167,6 +167,7 @@ test_xtcp_import_code_helpers() {
   require_function parse_xtcp_payload_value
   require_function write_xtcp_exposed_config
   require_function write_xtcp_visitor_config_from_payload
+  require_function tune_xtcp_config_file
   require_function xtcp_pair_menu
 
   local payload code decoded visitor_file exposed_file
@@ -195,8 +196,9 @@ test_xtcp_import_code_helpers() {
   assert_eq "$payload" "$decoded" "xtcp code decrypts to payload"
 
   exposed_file="${TMP_DIR}/xtcp-exposed.toml"
-  write_xtcp_exposed_config "$exposed_file" "p2p_ssh" "secret-key" "127.0.0.1" "22" "true" "p2p_ssh_stcp"
+  write_xtcp_exposed_config "$exposed_file" "p2p_ssh" "secret-key" "127.0.0.1" "22" "true" "p2p_ssh_stcp" "true"
   assert_contains 'type = "xtcp"' "$exposed_file" "xtcp exposed proxy rendered"
+  assert_contains '[proxies.natTraversal]' "$exposed_file" "xtcp exposed nat traversal section rendered"
   assert_contains 'name = "p2p_ssh_stcp"' "$exposed_file" "stcp fallback proxy rendered"
 
   visitor_file="${TMP_DIR}/xtcp-visitor.toml"
@@ -208,6 +210,26 @@ test_xtcp_import_code_helpers() {
   assert_contains '[visitors.natTraversal]' "$visitor_file" "xtcp nat traversal section rendered"
   assert_contains 'disableAssistedAddrs = true' "$visitor_file" "xtcp assisted addresses disabled"
   assert_contains 'bindPort = -1' "$visitor_file" "stcp fallback bind port rendered"
+
+  local old_visitor_file
+  old_visitor_file="${TMP_DIR}/old-xtcp-visitor.toml"
+  cat > "$old_visitor_file" <<'EOF_OLD_XTCP_VISITOR'
+[[visitors]]
+name = "p2p_ssh_visitor"
+type = "xtcp"
+serverName = "p2p_ssh"
+secretKey = "secret-key"
+bindAddr = "127.0.0.1"
+bindPort = 6000
+protocol = "quic"
+keepTunnelOpen = false
+fallbackTo = "p2p_ssh_stcp_fallback"
+fallbackTimeoutMs = 200
+EOF_OLD_XTCP_VISITOR
+  tune_xtcp_config_file "$old_visitor_file" "kcp" "true" "5000"
+  assert_contains 'protocol = "kcp"' "$old_visitor_file" "xtcp repair switches visitor to kcp"
+  assert_contains 'fallbackTimeoutMs = 5000' "$old_visitor_file" "xtcp repair raises fallback timeout"
+  assert_contains '[visitors.natTraversal]' "$old_visitor_file" "xtcp repair adds visitor nat traversal"
 }
 
 test_frps_pairing_code_helpers() {
