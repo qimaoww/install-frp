@@ -233,6 +233,74 @@ EOF_VERIFY_FAIL
   assert_not_contains 'restart:frpc' <(printf '%s\n' "$edit_output") "edit config skips restart after verify failure"
 }
 
+test_global_verify_and_logs_cover_instances() {
+  require_function verify_all_configs
+  require_function show_service_log
+  require_function patch_log_config_file
+
+  mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR/home" "$LOG_DIR"
+  : > "${INSTALL_DIR}/frps"
+  : > "${INSTALL_DIR}/frpc"
+  chmod +x "${INSTALL_DIR}/frps" "${INSTALL_DIR}/frpc"
+  printf 'bindPort = 7000\n' > "$FRPS_CONFIG"
+  printf 'serverPort = 7000\n' > "$FRPC_CONFIG"
+  printf 'serverPort = 7000\nlog.to = "%s/frpc-home.log"\n' "$LOG_DIR" > "${FRPC_CLIENTS_DIR}/home/frpc.toml"
+  printf 'home log line\n' > "${LOG_DIR}/frpc-home.log"
+
+  local verify_output
+  verify_output="$(
+    (
+      verify_config() { printf 'verify:%s\n' "$2"; }
+      verify_all_configs
+    ) 2>&1
+  )"
+  assert_contains "verify:${FRPC_CLIENTS_DIR}/home/frpc.toml" <(printf '%s\n' "$verify_output") "global verify includes named frpc instances"
+
+  local log_output
+  log_output="$(show_service_log "frpc@home" "5" "false" 2>&1)"
+  assert_contains 'home log line' <(printf '%s\n' "$log_output") "named frpc service log reads instance log file"
+
+  patch_log_config_file "${FRPC_CLIENTS_DIR}/home/frpc.toml" "${LOG_DIR}/frpc-home.log" "frpc@home" >/dev/null
+  assert_contains 'log.to = "'"${LOG_DIR}"'/frpc-home.log"' "${FRPC_CLIENTS_DIR}/home/frpc.toml" "log patch supports named frpc config"
+}
+
+test_log_fix_all_is_best_effort() {
+  require_function fix_log_config_menu
+  require_function fix_log_config_target
+  require_function select_existing_named_frpc_target
+
+  local case_root="${TMP_DIR}/log-fix-all" output instance_conf instance_log
+  instance_conf="${case_root}/etc/frp/clients/home/frpc.toml"
+  instance_log="${case_root}/var/log/frp/frpc-home.log"
+  output="$(
+    (
+      INSTALL_DIR="${case_root}/usr/local/bin"
+      CONFIG_DIR="${case_root}/etc/frp"
+      FRPS_CONFIG="${CONFIG_DIR}/frps.toml"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      LOG_DIR="${case_root}/var/log/frp"
+      mkdir -p "$INSTALL_DIR" "${FRPC_CLIENTS_DIR}/home" "$LOG_DIR"
+      : > "${INSTALL_DIR}/frpc"
+      chmod +x "${INSTALL_DIR}/frpc"
+      printf 'serverPort = 7000\n' > "$instance_conf"
+      ask() { printf '4'; }
+      confirm() { return 1; }
+      verify_config() { printf 'verify:%s\n' "$2"; return 0; }
+      fix_log_config_menu
+    ) 2>&1
+  )"
+
+  assert_contains "跳过 frps" <(printf '%s\n' "$output") "log repair all skips missing frps without aborting"
+  assert_contains "跳过 frpc" <(printf '%s\n' "$output") "log repair all skips missing default frpc without aborting"
+  assert_contains "verify:${instance_conf}" <(printf '%s\n' "$output") "log repair all still verifies named instance"
+  assert_contains 'log.to = "'"${instance_log}"'"' "$instance_conf" "log repair all patches named instance after skips"
+
+  local fix_log_body
+  fix_log_body="$(declare -f fix_log_config_menu)"
+  assert_contains 'select_existing_named_frpc_target' <(printf '%s\n' "$fix_log_body") "named log repair does not duplicate default frpc selector"
+}
+
 test_frpc_proxy_target_helpers() {
   require_function select_frpc_split_dir_for_write
   require_function with_frpc_write_target
@@ -259,8 +327,8 @@ test_frpc_proxy_target_helpers() {
   assert_contains 'manage_custom_presets_menu' <(printf '%s\n' "$add_proxy_body") "proxy wizard manages presets without selecting target"
   assert_contains 'with_frpc_write_target add_proxy_manual_wizard' <(printf '%s\n' "$add_proxy_body") "proxy wizard chooses target before manual write"
   assert_contains 'with_frpc_write_target paste_raw_frpc_toml' <(printf '%s\n' "$add_proxy_body") "proxy wizard chooses target before raw toml write"
-  assert_contains 'with_frpc_write_target apply_custom_preset' <(printf '%s\n' "$manage_presets_body") "preset menu chooses target before applying preset"
-  assert_contains 'with_frpc_write_target paste_raw_frpc_toml' <(printf '%s\n' "$manage_presets_body") "preset menu chooses target before raw toml write"
+  assert_not_contains 'with_frpc_write_target apply_custom_preset' <(printf '%s\n' "$manage_presets_body") "preset management does not duplicate apply action"
+  assert_not_contains 'with_frpc_write_target paste_raw_frpc_toml' <(printf '%s\n' "$manage_presets_body") "preset management does not duplicate raw toml action"
 
   assert_contains 'SELECTED_FRPC_SPLIT_DIR' <(printf '%s\n' "$write_body") "rendered writer creates selected split dir"
   assert_contains 'SELECTED_FRPC_CONFIG' <(printf '%s\n' "$write_body") "rendered writer verifies selected main config"
@@ -318,6 +386,181 @@ test_frpc_proxy_target_helpers() {
   assert_not_contains 'restart:frpc@selected' <(printf '%s\n' "$write_output") "rendered writer skips restart after verify failure"
 }
 
+test_import_targets_and_safe_failures() {
+  require_function render_one_click_import_command
+  require_function import_frps_pairing_code
+  require_function import_xtcp_code_to_visitor
+  require_function service_action
+  require_function systemctl_enable_restart
+  require_function restart_service_if_present
+
+  local import_cmd
+  import_cmd="$(render_one_click_import_command "frps" "IFRP-FRPC-V1:abc" "pass phrase")"
+  assert_contains "'default'" <(printf '%s\n' "$import_cmd") "one-click import command carries explicit default target"
+
+  local bad_output bad_status
+  bad_status=0
+  if bad_output="$(import_frps_pairing_code "bad-code" "bad-pass" "false" "default" 2>&1)"; then
+    bad_status=0
+  else
+    bad_status=$?
+  fi
+  assert_eq "0" "$bad_status" "interactive frps import decode failure returns to menu"
+  assert_contains '解密失败' <(printf '%s\n' "$bad_output") "interactive frps import explains decode failure"
+
+  bad_status=0
+  if bad_output="$(import_xtcp_code_to_visitor "bad-code" "bad-pass" "true" "default" 2>&1)"; then
+    fail "strict xtcp import decode failure should return non-zero"
+  else
+    bad_status=$?
+  fi
+  assert_eq "1" "$bad_status" "strict xtcp import decode failure returns non-zero"
+  assert_contains '解密失败' <(printf '%s\n' "$bad_output") "strict xtcp import explains decode failure"
+
+  local service_output
+  service_output="$(
+    (
+      has_cmd() { [[ "$1" == "systemctl" ]]; }
+      service_exists() { return 0; }
+      systemctl() {
+        case "$1" in
+          list-unit-files|is-active|is-enabled|show) return 0 ;;
+          *) return 9 ;;
+        esac
+      }
+      service_action frpc restart false
+      systemctl_enable_restart frpc
+    ) 2>&1
+  )"
+  assert_contains '执行失败' <(printf '%s\n' "$service_output") "systemctl failures warn instead of exiting"
+
+  local missing_systemd_output
+  missing_systemd_output="$(
+    (
+      has_cmd() { return 1; }
+      print_service_summary() { printf 'summary:%s\n' "$1"; }
+      systemctl_enable_restart frpc
+    ) 2>&1
+  )"
+  assert_contains '无法管理 frpc' <(printf '%s\n' "$missing_systemd_output") "enable restart reports missing systemctl"
+  assert_not_contains '已启动并设置开机自启' <(printf '%s\n' "$missing_systemd_output") "enable restart does not claim success without systemctl"
+
+  local cli_status cli_output
+  cli_status=0
+  if cli_output="$(
+    (
+      need_root() { return 0; }
+      has_cmd() { [[ "$1" == "systemctl" ]]; }
+      service_exists() { return 0; }
+      systemctl() {
+        case "$1" in
+          list-unit-files|is-active|is-enabled|show) return 0 ;;
+          restart) return 9 ;;
+          *) return 0 ;;
+        esac
+      }
+      run_cli --service frpc restart
+    ) 2>&1
+  )"; then
+    fail "cli service restart should return non-zero on systemctl failure"
+  else
+    cli_status=$?
+  fi
+  assert_eq "1" "$cli_status" "cli service restart returns non-zero on systemctl failure"
+  assert_contains '执行失败' <(printf '%s\n' "$cli_output") "cli service restart explains failure"
+
+  local restart_output
+  restart_output="$(
+    (
+      has_cmd() { [[ "$1" == "systemctl" ]]; }
+      service_exists() { return 0; }
+      confirm() { return 0; }
+      systemctl() {
+        case "$1" in
+          list-unit-files|is-active|is-enabled|show) return 0 ;;
+          restart) return 9 ;;
+          *) return 0 ;;
+        esac
+      }
+      print_service_summary() { printf 'summary:%s\n' "$1"; }
+      restart_service_if_present frpc "restart?" "Y"
+    ) 2>&1
+  )"
+  assert_contains '重启失败' <(printf '%s\n' "$restart_output") "restart helper reports service restart failure"
+  assert_not_contains '已重启' <(printf '%s\n' "$restart_output") "restart helper does not claim success after failure"
+
+  local pair_payload pair_code xtcp_payload xtcp_code existing_output existing_status
+  pair_payload="$(render_frpc_pairing_payload "frps.example.com" "7000" "token" "tcp" "true" "0" "" "")"
+  pair_code="$(encrypt_payload_code "IFRP-FRPC-V1" "passphrase" "$pair_payload")"
+  existing_status=0
+  if existing_output="$(
+    (
+      CONFIG_DIR="${TMP_DIR}/existing-frps"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${CONFIG_DIR}/logs"
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      FRPC_STORE="${CONFIG_DIR}/frpc-store.json"
+      create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; printf 'old\n' > "$FRPC_CONFIG"; }
+      confirm() { return 1; }
+      verify_config() { printf 'unexpected verify\n'; return 0; }
+      restart_service_if_present() { printf 'unexpected restart\n'; }
+      import_frps_pairing_code "$pair_code" "passphrase" "true" "default"
+    ) 2>&1
+  )"; then
+    fail "strict frps import should fail when existing target is not overwritten"
+  else
+    existing_status=$?
+  fi
+  assert_eq "1" "$existing_status" "strict frps import returns non-zero when overwrite is declined"
+  assert_contains '已取消覆盖' <(printf '%s\n' "$existing_output") "strict frps import reports declined overwrite"
+
+  xtcp_payload="$(render_xtcp_payload "frps.example.com" "7000" "p2p_ssh" "p2p_ssh_visitor" "secret" "127.0.0.1" "6000" "true" "false" "" "" "5000" "quic" "false" "" "")"
+  xtcp_code="$(encrypt_payload_code "IFRP-XTCP-V1" "passphrase" "$xtcp_payload")"
+  existing_status=0
+  if existing_output="$(
+    (
+      CONFIG_DIR="${TMP_DIR}/existing-xtcp"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${CONFIG_DIR}/logs"
+      create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; : > "$FRPC_CONFIG"; printf 'old\n' > "${FRPC_CONF_DIR}/p2p_ssh_visitor.toml"; }
+      confirm() { return 1; }
+      verify_config() { printf 'unexpected verify\n'; return 0; }
+      restart_service_if_present() { printf 'unexpected restart\n'; }
+      import_xtcp_code_to_visitor "$xtcp_code" "passphrase" "true" "default"
+    ) 2>&1
+  )"; then
+    fail "strict xtcp import should fail when existing target is not overwritten"
+  else
+    existing_status=$?
+  fi
+  assert_eq "1" "$existing_status" "strict xtcp import returns non-zero when overwrite is declined"
+  assert_contains '已取消覆盖' <(printf '%s\n' "$existing_output") "strict xtcp import reports declined overwrite"
+
+  existing_status=0
+  if existing_output="$(import_frps_pairing_code "$pair_code" "passphrase" "true" "instance" 2>&1)"; then
+    fail "strict frps import should reject bare instance target"
+  else
+    existing_status=$?
+  fi
+  assert_eq "1" "$existing_status" "strict frps import rejects bare instance target"
+  assert_contains 'instance:<name>' <(printf '%s\n' "$existing_output") "bare instance target explains required syntax"
+
+  existing_status=0
+  if existing_output="$(import_xtcp_code_to_visitor "$xtcp_code" "passphrase" "true" "instance" 2>&1)"; then
+    fail "strict xtcp import should reject bare instance target"
+  else
+    existing_status=$?
+  fi
+  assert_eq "1" "$existing_status" "strict xtcp import rejects bare instance target"
+  assert_contains 'instance:<name>' <(printf '%s\n' "$existing_output") "bare xtcp instance target explains required syntax"
+}
+
 test_xtcp_import_code_helpers() {
   require_function render_xtcp_payload
   require_function encrypt_payload_code
@@ -348,10 +591,14 @@ test_xtcp_import_code_helpers() {
     "p2p_ssh_stcp_fallback" \
     "5000" \
     "quic" \
-    "true")"
+    "true" \
+    "remote-user" \
+    "*")"
 
   assert_eq "install-frp-xtcp-v1" "$(parse_xtcp_payload_value "$payload" format)" "xtcp payload format"
   assert_eq "p2p_ssh" "$(parse_xtcp_payload_value "$payload" proxyName)" "xtcp proxy name parsed"
+  assert_eq "remote-user" "$(parse_xtcp_payload_value "$payload" serverUser)" "xtcp server user parsed"
+  assert_eq "*" "$(parse_xtcp_payload_value "$payload" allowUsers)" "xtcp allow users parsed"
 
   code="$(encrypt_payload_code "IFRP-XTCP-V1" "passphrase" "$payload")"
   [[ "$code" == IFRP-XTCP-V1:* ]] || fail "xtcp code prefix missing"
@@ -359,10 +606,11 @@ test_xtcp_import_code_helpers() {
   assert_eq "$payload" "$decoded" "xtcp code decrypts to payload"
 
   exposed_file="${TMP_DIR}/xtcp-exposed.toml"
-  write_xtcp_exposed_config "$exposed_file" "p2p_ssh" "secret-key" "127.0.0.1" "22" "true" "p2p_ssh_stcp" "true"
+  write_xtcp_exposed_config "$exposed_file" "p2p_ssh" "secret-key" "127.0.0.1" "22" "true" "p2p_ssh_stcp" "true" "*"
   assert_contains 'type = "xtcp"' "$exposed_file" "xtcp exposed proxy rendered"
   assert_contains '[proxies.natTraversal]' "$exposed_file" "xtcp exposed nat traversal section rendered"
   assert_contains 'name = "p2p_ssh_stcp"' "$exposed_file" "stcp fallback proxy rendered"
+  assert_contains 'allowUsers = ["*"]' "$exposed_file" "xtcp exposed allow users rendered"
 
   visitor_file="${TMP_DIR}/xtcp-visitor.toml"
   write_xtcp_visitor_config_from_payload "$visitor_file" "$payload"
@@ -371,6 +619,7 @@ test_xtcp_import_code_helpers() {
   assert_contains 'keepTunnelOpen = true' "$visitor_file" "xtcp keep tunnel open rendered"
   assert_contains 'fallbackTo = "p2p_ssh_stcp_fallback"' "$visitor_file" "xtcp fallback rendered"
   assert_contains 'fallbackTimeoutMs = 5000' "$visitor_file" "xtcp fallback timeout rendered"
+  assert_contains 'serverUser = "remote-user"' "$visitor_file" "xtcp visitor server user rendered"
   assert_contains '[visitors.natTraversal]' "$visitor_file" "xtcp nat traversal section rendered"
   assert_contains 'disableAssistedAddrs = true' "$visitor_file" "xtcp assisted addresses disabled"
   assert_contains 'bindPort = -1' "$visitor_file" "stcp fallback bind port rendered"
@@ -390,7 +639,7 @@ test_xtcp_import_code_helpers() {
       confirm() { return 0; }
       verify_config() { printf 'verify:%s\n' "$2"; return 19; }
       restart_service_if_present() { printf 'restart:%s\n' "$1"; }
-      import_xtcp_code_to_visitor "$code" "passphrase" "true"
+      import_xtcp_code_to_visitor "$code" "passphrase" "true" "default"
     ) 2>&1
   )"; then
     fail "strict xtcp import should return verify failure"
@@ -400,6 +649,28 @@ test_xtcp_import_code_helpers() {
   assert_eq "19" "$strict_status" "strict xtcp import returns verify failure"
   assert_contains "verify:${TMP_DIR}/strict-xtcp/frpc.toml" <(printf '%s\n' "$strict_output") "strict xtcp import verifies selected config"
   assert_not_contains 'restart:frpc' <(printf '%s\n' "$strict_output") "strict xtcp import skips restart after verify failure"
+
+  local instance_root="${TMP_DIR}/xtcp-instance" instance_output
+  instance_output="$(
+    (
+      CONFIG_DIR="${instance_root}/etc/frp"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${instance_root}/var/log/frp"
+      create_dirs_and_user() {
+        mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "${FRPC_CLIENTS_DIR}/home/frpc.d" "$PRESET_DIR" "$LOG_DIR"
+        : > "${FRPC_CLIENTS_DIR}/home/frpc.toml"
+      }
+      verify_config() { printf 'verify:%s\n' "$2"; return 0; }
+      restart_service_if_present() { printf 'restart:%s\n' "$1"; }
+      import_xtcp_code_to_visitor "$code" "passphrase" "true" "instance:home"
+    ) 2>&1
+  )"
+  assert_contains "verify:${instance_root}/etc/frp/clients/home/frpc.toml" <(printf '%s\n' "$instance_output") "strict xtcp import verifies named instance config"
+  assert_contains 'type = "xtcp"' "${instance_root}/etc/frp/clients/home/frpc.d/p2p_ssh_visitor.toml" "strict xtcp import writes named instance visitor"
+  assert_contains 'restart:frpc@home' <(printf '%s\n' "$instance_output") "strict xtcp import restarts named instance"
 
   local old_visitor_file
   old_visitor_file="${TMP_DIR}/old-xtcp-visitor.toml"
@@ -483,6 +754,39 @@ test_frps_pairing_code_helpers() {
   assert_contains 'auth.tokenSource.file.path = "'"$token_path"'"' "$config_path" "paired frpc token source"
   assert_contains 'server-token#frag' "$token_path" "paired token file"
 
+  local export_root="${TMP_DIR}/export-frps" export_output
+  export_output="$(
+    (
+      CONFIG_DIR="${export_root}/etc/frp"
+      FRPS_CONFIG="${CONFIG_DIR}/frps.toml"
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      LOG_DIR="${export_root}/var/log/frp"
+      mkdir -p "$CONFIG_DIR" "$LOG_DIR"
+      printf 'server-token#frag\n' > "$TOKEN_FILE"
+      printf 'bindPort = 7000\nkcpBindPort = 7000\nquicBindPort = 7001\n' > "$FRPS_CONFIG"
+      create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$LOG_DIR"; }
+      ask_required() { printf 'frps.example.com'; }
+      ask() {
+        printf 'ask:%s:%s\n' "$1" "${2:-}" >&2
+        case "$1" in
+          *transport.protocol*) printf 'quic' ;;
+          *端口*) printf '%s' "$2" ;;
+          *连接池*) printf '0' ;;
+          *DNS*) printf '' ;;
+          *user*) printf '' ;;
+          *口令*) printf 'passphrase' ;;
+          *) printf '%s' "${2:-}" ;;
+        esac
+      }
+      confirm() { return 0; }
+      encrypt_payload_code() { printf 'IFRP-FRPC-V1:test'; printf '\npayload:%s\n' "$3" >&2; }
+      export_frps_pairing_code
+    ) 2>&1
+  )"
+  assert_contains 'ask:新客户端连接的 frps 端口；quic 对应端口:7001' <(printf '%s\n' "$export_output") "frps export defaults quic pairing port to quicBindPort"
+  assert_contains 'transportProtocol = "quic"' <(printf '%s\n' "$export_output") "frps export pairing payload keeps selected quic protocol"
+  assert_contains 'serverPort = 7001' <(printf '%s\n' "$export_output") "frps export pairing payload uses quicBindPort"
+
   local import_output import_status
   import_status=0
   if import_output="$(
@@ -500,7 +804,7 @@ test_frps_pairing_code_helpers() {
       confirm() { return 0; }
       verify_config() { printf 'verify:%s\n' "$2"; return 17; }
       restart_service_if_present() { printf 'restart:%s\n' "$1"; }
-      import_frps_pairing_code "$code" "passphrase" "true"
+      import_frps_pairing_code "$code" "passphrase" "true" "default"
     ) 2>&1
   )"; then
     fail "strict frps pairing import should return verify failure"
@@ -510,6 +814,29 @@ test_frps_pairing_code_helpers() {
   assert_eq "17" "$import_status" "strict frps import returns verify failure"
   assert_contains "verify:${TMP_DIR}/strict-frps/frpc.toml" <(printf '%s\n' "$import_output") "strict frps import verifies target config"
   assert_not_contains 'restart:frpc' <(printf '%s\n' "$import_output") "strict frps import skips restart after verify failure"
+
+  local instance_root="${TMP_DIR}/pair-instance" instance_output
+  instance_output="$(
+    (
+      CONFIG_DIR="${instance_root}/etc/frp"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${instance_root}/var/log/frp"
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      FRPC_STORE="${CONFIG_DIR}/frpc-store.json"
+      create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; }
+      write_frpc_template_service() { printf 'template-service\n'; }
+      verify_config() { printf 'verify:%s\n' "$2"; return 0; }
+      restart_service_if_present() { printf 'restart:%s\n' "$1"; }
+      import_frps_pairing_code "$code" "passphrase" "true" "instance:home"
+    ) 2>&1
+  )"
+  assert_contains "verify:${instance_root}/etc/frp/clients/home/frpc.toml" <(printf '%s\n' "$instance_output") "strict frps import verifies named instance config"
+  assert_contains 'serverAddr = "frps.example.com"' "${instance_root}/etc/frp/clients/home/frpc.toml" "strict frps import writes named instance config"
+  assert_contains 'server-token#frag' "${instance_root}/etc/frp/clients/home/token" "strict frps import writes named instance token"
+  assert_contains 'log.to = "'"${instance_root}"'/var/log/frp/frpc-home.log"' "${instance_root}/etc/frp/clients/home/frpc.toml" "strict frps import writes named instance log path"
 }
 
 test_install_state_and_status_bar() {
@@ -611,6 +938,9 @@ EOF_FAKE_FRPC_RESTORE
   ! declare -f curl_download | grep -Fq 'curl -fL ' || fail "curl download should be silent and not show progress meter"
   ! grep -Fq 'systemctl --no-pager --full status' "${ROOT_DIR}/frp.sh" || fail "script should not dump full systemd status in normal flow"
   declare -f create_xtcp_exposed_and_code | grep -Fq 'restart_service_if_present "$SELECTED_FRPC_SERVICE"' || fail "xtcp exposed setup should restart/register exposed proxy"
+  declare -f configure_frps | grep -Fq '是否启用 frps Dashboard / Prometheus" "n"' || fail "frps dashboard should not be enabled by default"
+  declare -f configure_frps | grep -Fq '127.0.0.1' || fail "frps dashboard should default to local address"
+  declare -f configure_frps | grep -Fq '不能和 kcpBindPort' || fail "frps should prevent kcp/quic UDP port conflicts"
 
   local import_cmd
   import_cmd="$(render_one_click_import_command "xtcp" "IFRP-XTCP-V1:abc" "pa ss'word")"
@@ -619,8 +949,8 @@ EOF_FAKE_FRPC_RESTORE
   ! printf '%s\n' "$import_cmd" | grep -Fq '/refs/heads/main/' || fail "one-click command should avoid stale refs/heads raw cache"
   declare -f export_frps_pairing_code | grep -Fq 'render_one_click_import_command "frps"' || fail "frps export should print one-click import command"
   declare -f create_xtcp_exposed_and_code | grep -Fq 'render_one_click_import_command "xtcp"' || fail "xtcp export should print one-click import command"
-  declare -f run_cli | grep -Fq 'import_frps_pairing_code "${2:-}" "${3:-}" "true"' || fail "cli frps import should use strict verify"
-  declare -f run_cli | grep -Fq 'import_xtcp_code_to_visitor "${2:-}" "${3:-}" "true"' || fail "cli xtcp import should use strict verify"
+  declare -f run_cli | grep -Fq 'import_frps_pairing_code "${2:-}" "${3:-}" "true" "${4:-}"' || fail "cli frps import should use strict verify and explicit target"
+  declare -f run_cli | grep -Fq 'import_xtcp_code_to_visitor "${2:-}" "${3:-}" "true" "${4:-}"' || fail "cli xtcp import should use strict verify and explicit target"
 
   local restart_output
   if ! restart_output="$( ( has_cmd() { return 1; }; restart_service_if_present frpc ) 2>&1 )"; then
@@ -651,7 +981,10 @@ main() {
   test_named_instance_lifecycle_helpers
   test_config_edit_helpers
   test_verify_config_behavior
+  test_global_verify_and_logs_cover_instances
+  test_log_fix_all_is_best_effort
   test_frpc_proxy_target_helpers
+  test_import_targets_and_safe_failures
   test_xtcp_import_code_helpers
   test_frps_pairing_code_helpers
   test_install_state_and_status_bar
