@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r15}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r16}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -761,10 +761,28 @@ try_open_firewall_port() {
 
 verify_config() {
   local bin="$1" conf="$2"
-  if [[ -x "$bin" && -f "$conf" ]]; then
-    info "校验配置：$bin verify -c $conf"
-    "$bin" verify -c "$conf"
+  if [[ ! -x "$bin" ]]; then
+    warn "无法校验配置：frp 可执行文件不存在或不可执行：$bin"
+    return 1
   fi
+  if [[ ! -f "$conf" ]]; then
+    warn "无法校验配置：配置文件不存在：$conf"
+    return 1
+  fi
+  info "校验配置：$bin verify -c $conf"
+  "$bin" verify -c "$conf"
+}
+
+verify_config_interactive() {
+  verify_config "$@" || true
+}
+
+verify_config_before_restart() {
+  local status
+  verify_config "$@" && return 0
+  status=$?
+  warn "配置校验失败，请先修复配置，已跳过自动重启：$2"
+  return "$status"
 }
 
 frp_version_text() {
@@ -1001,11 +1019,33 @@ write_frpc_config_from_pairing_payload() {
 }
 
 list_frpc_instances() {
-  local files=() file
+  local files=() file name
   [[ -d "$FRPC_CLIENTS_DIR" ]] || return 0
   mapfile -d '' -t files < <(find "$FRPC_CLIENTS_DIR" -mindepth 2 -maxdepth 2 -type f -name frpc.toml -print0 2>/dev/null | sort -z)
   for file in "${files[@]}"; do
-    basename "$(dirname "$file")"
+    name="$(basename "$(dirname "$file")")"
+    validate_instance_name "$name" || continue
+    printf '%s\n' "$name"
+  done
+}
+
+render_frpc_instance_list() {
+  local instances=() name service config split_dir
+  mapfile -t instances < <(list_frpc_instances)
+  if (( ${#instances[@]} == 0 )); then
+    printf '没有命名 frpc 实例。\n'
+    printf '下一步：选择 2) 新建/重配实例。\n'
+    return 0
+  fi
+
+  printf '命名 frpc 实例：\n'
+  for name in "${instances[@]}"; do
+    service="$(instance_service_name "$name")"
+    config="$(instance_frpc_config "$name")"
+    split_dir="$(instance_frpc_conf_dir "$name")"
+    printf -- '- %s  %s  %s\n' "$name" "$service" "$(ui_service_state "$(service_status_label "$service")")"
+    printf '  主配置：%s\n' "$config"
+    printf '  拆分目录：%s\n' "$split_dir"
   done
 }
 
@@ -1127,7 +1167,7 @@ configure_named_frpc_instance() {
     "$store_file" \
     "$enable_store"
 
-  verify_config "${INSTALL_DIR}/frpc" "$config"
+  verify_config_before_restart "${INSTALL_DIR}/frpc" "$config" || return 0
   write_frpc_template_service
   service="$(instance_service_name "$name")"
   if confirm "是否现在启动/重启 ${service}" "Y"; then
@@ -1252,7 +1292,7 @@ EOF_FRPS_DASH
 
   chown root:"$FRP_USER" "$FRPS_CONFIG" 2>/dev/null || true
   chmod 640 "$FRPS_CONFIG"
-  verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"
+  verify_config_before_restart "${INSTALL_DIR}/frps" "$FRPS_CONFIG" || return 0
 
   write_systemd_service "frps" "${INSTALL_DIR}/frps" "$FRPS_CONFIG"
   if confirm "是否现在启动/重启 frps" "Y"; then
@@ -1338,7 +1378,7 @@ configure_frpc() {
 
   chown root:"$FRP_USER" "$FRPC_CONFIG" 2>/dev/null || true
   chmod 640 "$FRPC_CONFIG"
-  verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
+  verify_config_before_restart "${INSTALL_DIR}/frpc" "$FRPC_CONFIG" || return 0
 
   write_systemd_service "frpc" "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
   if confirm "是否现在启动/重启 frpc" "Y"; then
@@ -1873,11 +1913,12 @@ repair_xtcp_path() {
 }
 
 select_frpc_split_dir_for_write() {
-  local target name
+  local target name config
   echo "写入目标：1) 默认 frpc  2) 命名 frpc 实例"
   target="$(ask "请选择" "1")"
   case "$target" in
     1|default|frpc)
+      SELECTED_FRPC_LABEL="默认 frpc"
       SELECTED_FRPC_CONFIG="$FRPC_CONFIG"
       SELECTED_FRPC_SPLIT_DIR="$FRPC_CONF_DIR"
       SELECTED_FRPC_SERVICE="frpc"
@@ -1885,13 +1926,24 @@ select_frpc_split_dir_for_write() {
     2|instance)
       name="$(ask_required "实例名" "")"
       validate_instance_name "$name" || { warn "实例名不合法：$name"; return 1; }
-      SELECTED_FRPC_CONFIG="$(instance_frpc_config "$name")"
+      config="$(instance_frpc_config "$name")"
+      if [[ ! -f "$config" ]]; then
+        warn "命名 frpc 实例主配置不存在：$config"
+        return 1
+      fi
+      SELECTED_FRPC_LABEL="实例 ${name}"
+      SELECTED_FRPC_CONFIG="$config"
       SELECTED_FRPC_SPLIT_DIR="$(instance_frpc_conf_dir "$name")"
       SELECTED_FRPC_SERVICE="$(instance_service_name "$name")"
       ;;
     *) warn "无效选择"; return 1 ;;
   esac
   mkdir -p "$SELECTED_FRPC_SPLIT_DIR"
+}
+
+with_frpc_write_target() {
+  select_frpc_split_dir_for_write || return 0
+  "$@"
 }
 
 create_xtcp_exposed_and_code() {
@@ -1928,7 +1980,7 @@ create_xtcp_exposed_and_code() {
     fi
   fi
   write_xtcp_exposed_config "$file" "$name" "$secret" "$local_ip" "$local_port" "$fallback" "$fallback_proxy" "$disable_assisted"
-  verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"
+  verify_config_before_restart "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG" || return 0
 
   payload="$(render_xtcp_payload "$server_addr" "$server_port" "$name" "${name}_visitor" "$secret" "$bind_addr" "$bind_port" "$keep_open" "$fallback" "$fallback_proxy" "$fallback_visitor" "$timeout" "$protocol" "$disable_assisted")"
   passphrase="$(ask "导入码加密口令，留空随机生成" "")"
@@ -1949,10 +2001,11 @@ create_xtcp_exposed_and_code() {
 
 import_xtcp_code_to_visitor() {
   create_dirs_and_user
-  local code passphrase payload visitor_name safe_name file
+  local code passphrase strict_verify payload visitor_name safe_name file verify_status
   select_frpc_split_dir_for_write || return 0
   code="${1:-}"
   passphrase="${2:-}"
+  strict_verify="${3:-false}"
   if [[ -z "$code" ]]; then
     warn "请粘贴 XTCP 加密导入码，格式为 IFRP-XTCP-V1:..."
     code="$(ask_required "XTCP 导入码" "")"
@@ -1971,7 +2024,12 @@ import_xtcp_code_to_visitor() {
     fi
   fi
   write_xtcp_visitor_config_from_payload "$file" "$payload"
-  verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"
+  verify_status=0
+  verify_config_before_restart "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG" || verify_status=$?
+  if (( verify_status != 0 )); then
+    [[ "$strict_verify" == "true" ]] && return "$verify_status"
+    return 0
+  fi
   restart_service_if_present "$SELECTED_FRPC_SERVICE"
   ok "已导入 XTCP 访问端配置：$file"
 }
@@ -2001,7 +2059,7 @@ xtcp_config_check_menu() {
   fi
 
   repair_xtcp_path "$SELECTED_FRPC_SPLIT_DIR" "$protocol" "$disable_assisted" "$timeout" "true"
-  verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"
+  verify_config_before_restart "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG" || return 0
   echo
   info "修复后 XTCP 配置摘要"
   render_xtcp_path_summary "$SELECTED_FRPC_SPLIT_DIR"
@@ -2114,7 +2172,10 @@ choose_preset_file() {
 
 write_rendered_frpc_config() {
   local output_file="$1" tmpfile="$2"
-  mkdir -p "$FRPC_CONF_DIR"
+  local split_dir="${SELECTED_FRPC_SPLIT_DIR:-$FRPC_CONF_DIR}"
+  local config="${SELECTED_FRPC_CONFIG:-$FRPC_CONFIG}"
+  local service="${SELECTED_FRPC_SERVICE:-frpc}"
+  mkdir -p "$split_dir"
   if [[ -f "$output_file" ]]; then
     if confirm "配置 ${output_file} 已存在，是否覆盖" "n"; then
       cp -a "$output_file" "${output_file}.bak.$(date +%Y%m%d-%H%M%S)"
@@ -2125,8 +2186,8 @@ write_rendered_frpc_config() {
   install -m 0640 "$tmpfile" "$output_file"
   chown root:"$FRP_USER" "$output_file" 2>/dev/null || true
   ok "已写入：$output_file"
-  verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
-  restart_service_if_present frpc
+  verify_config_before_restart "${INSTALL_DIR}/frpc" "$config" || return 0
+  restart_service_if_present "$service"
 }
 
 render_custom_preset_to_file() {
@@ -2159,7 +2220,7 @@ render_custom_preset_to_file() {
   out_name="${out_name%.tpl}"; out_name="${out_name%.toml}"; out_name="${out_name%.preset}"
   [[ -n "$(trim "$out_name")" ]] || out_name="custom"
   safe_name="$(safe_filename "$out_name")"
-  output_file="${FRPC_CONF_DIR}/${safe_name}.toml"
+  output_file="${SELECTED_FRPC_SPLIT_DIR:-$FRPC_CONF_DIR}/${safe_name}.toml"
   tmpfile="$(mktemp)"
   printf '%s\n' "$content" > "$tmpfile"
 
@@ -2370,7 +2431,8 @@ EOF_STCP_PRESET
 
 apply_custom_preset() {
   create_dirs_and_user
-  [[ -f "$FRPC_CONFIG" ]] || warn "未检测到 $FRPC_CONFIG，建议先安装/配置 frpc。"
+  local config="${SELECTED_FRPC_CONFIG:-$FRPC_CONFIG}"
+  [[ -f "$config" ]] || warn "未检测到 $config，建议先安装/配置 frpc。"
   local file
   SELECTED_PRESET_FILE=""
   choose_preset_file || return 0
@@ -2383,7 +2445,7 @@ paste_raw_frpc_toml() {
   local name safe_name output_file tmpfile
   name="$(ask_required "生成到 frpc.d 的文件名" "custom")"
   safe_name="$(safe_filename "$name")"
-  output_file="${FRPC_CONF_DIR}/${safe_name}.toml"
+  output_file="${SELECTED_FRPC_SPLIT_DIR:-$FRPC_CONF_DIR}/${safe_name}.toml"
   tmpfile="$(mktemp)"
   paste_until_eof_to_file "$tmpfile"
   echo
@@ -2416,13 +2478,13 @@ EOF_PRESET_MENU
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
-      1) apply_custom_preset; pause ;;
+      1) with_frpc_write_target apply_custom_preset; pause ;;
       2) create_custom_preset; pause ;;
       3) edit_custom_preset; pause ;;
       4) show_custom_preset; pause ;;
       5) delete_custom_preset; pause ;;
       6) import_example_presets; pause ;;
-      7) paste_raw_frpc_toml; pause ;;
+      7) with_frpc_write_target paste_raw_frpc_toml; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -2431,16 +2493,19 @@ EOF_PRESET_MENU
 
 add_proxy_manual_wizard() {
   create_dirs_and_user
-  [[ -f "$FRPC_CONFIG" ]] || warn "未检测到 $FRPC_CONFIG，建议先安装/配置 frpc。"
+  local config="${SELECTED_FRPC_CONFIG:-$FRPC_CONFIG}"
+  local split_dir="${SELECTED_FRPC_SPLIT_DIR:-$FRPC_CONF_DIR}"
+  local service="${SELECTED_FRPC_SERVICE:-frpc}"
+  [[ -f "$config" ]] || warn "未检测到 $config，建议先安装/配置 frpc。"
   local type name safe_name file
   echo
   info "高级手动添加 frpc 代理/访问者配置"
-  echo "支持类型：tcp udp http https stcp xtcp sudp stcp-visitor xtcp-visitor sudp-visitor"
+  echo "支持类型：tcp udp http https stcp sudp stcp-visitor sudp-visitor"
   type="$(ask "类型" "tcp")"
-  case "$type" in tcp|udp|http|https|stcp|xtcp|sudp|stcp-visitor|xtcp-visitor|sudp-visitor) ;; *) fatal "不支持的类型：$type" ;; esac
+  case "$type" in tcp|udp|http|https|stcp|sudp|stcp-visitor|sudp-visitor) ;; *) fatal "不支持的类型：$type" ;; esac
   name="$(ask_required "名称 name，必须唯一" "")"
   safe_name="$(safe_filename "$name")"
-  file="${FRPC_CONF_DIR}/${safe_name}.toml"
+  file="${split_dir}/${safe_name}.toml"
 
   if [[ -f "$file" ]]; then
     if confirm "配置 ${file} 已存在，是否覆盖" "n"; then
@@ -2453,9 +2518,8 @@ add_proxy_manual_wizard() {
   case "$type" in
     tcp|udp) add_proxy_tcp_udp "$type" "$name" "$file" ;;
     http|https) add_proxy_http_https "$type" "$name" "$file" ;;
-    stcp|xtcp|sudp) add_proxy_stcp_xtcp_sudp "$type" "$name" "$file" ;;
+    stcp|sudp) add_proxy_stcp_xtcp_sudp "$type" "$name" "$file" ;;
     stcp-visitor) add_visitor_stcp_xtcp_sudp "stcp" "$name" "$file" ;;
-    xtcp-visitor) add_visitor_stcp_xtcp_sudp "xtcp" "$name" "$file" ;;
     sudp-visitor) add_visitor_stcp_xtcp_sudp "sudp" "$name" "$file" ;;
   esac
 
@@ -2463,11 +2527,12 @@ add_proxy_manual_wizard() {
   chmod 640 "$file"
   ok "已写入：$file"
 
-  verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
-  restart_service_if_present frpc
+  verify_config_before_restart "${INSTALL_DIR}/frpc" "$config" || return 0
+  restart_service_if_present "$service"
 }
 
 add_proxy_wizard() {
+  create_dirs_and_user
   while true; do
     menu_title "客户端 / 代理配置"
     ui_menu_item 1 "套用自定义预设"
@@ -2478,10 +2543,10 @@ add_proxy_wizard() {
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
-      1) apply_custom_preset; pause ;;
+      1) with_frpc_write_target apply_custom_preset; pause ;;
       2) manage_custom_presets_menu ;;
-      3) add_proxy_manual_wizard; pause ;;
-      4) paste_raw_frpc_toml; pause ;;
+      3) with_frpc_write_target add_proxy_manual_wizard; pause ;;
+      4) with_frpc_write_target paste_raw_frpc_toml; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -2554,9 +2619,10 @@ export_frps_pairing_code() {
 
 import_frps_pairing_code() {
   create_dirs_and_user
-  local code passphrase payload target name config split_dir token_file log_file store_file service
+  local code passphrase strict_verify payload target name config split_dir token_file log_file store_file service verify_status
   code="${1:-}"
   passphrase="${2:-}"
+  strict_verify="${3:-false}"
   if [[ -z "$code" ]]; then
     warn "请粘贴 frps 接入配对码，格式为 IFRP-FRPC-V1:..."
     code="$(ask_required "frps 接入配对码" "")"
@@ -2598,7 +2664,12 @@ import_frps_pairing_code() {
   fi
 
   write_frpc_config_from_pairing_payload "$config" "$split_dir" "$token_file" "$log_file" "$store_file" "$payload"
-  verify_config "${INSTALL_DIR}/frpc" "$config"
+  verify_status=0
+  verify_config_before_restart "${INSTALL_DIR}/frpc" "$config" || verify_status=$?
+  if (( verify_status != 0 )); then
+    [[ "$strict_verify" == "true" ]] && return "$verify_status"
+    return 0
+  fi
   restart_service_if_present "$service"
   ok "已导入 frps 接入配置：$config"
 }
@@ -2639,7 +2710,7 @@ manage_frpc_instances_menu() {
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
-      1|list) list_frpc_instances || true; pause ;;
+      1|list) render_frpc_instance_list; pause ;;
       2|create|configure) configure_named_frpc_instance; pause ;;
       3|service) manage_named_frpc_service_action; pause ;;
       4|delete|remove) delete_named_frpc_instance; pause ;;
@@ -2663,7 +2734,7 @@ frps_config_menu() {
     case "$choice" in
       1|view) show_config_file "$FRPS_CONFIG" "frps 主配置" "true"; pause ;;
       2|edit) edit_config_file "$FRPS_CONFIG" "frps 主配置" "${INSTALL_DIR}/frps" "frps"; pause ;;
-      3|verify) verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"; pause ;;
+      3|verify) verify_config_interactive "${INSTALL_DIR}/frps" "$FRPS_CONFIG"; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -2722,7 +2793,7 @@ frpc_config_target_menu_direct() {
         edit_config_file "$SELECTED_CONFIG_FILE" "${SELECTED_FRPC_LABEL} 拆分配置" "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_SERVICE"
         pause
         ;;
-      4|verify) verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"; pause ;;
+      4|verify) verify_config_interactive "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -2853,27 +2924,30 @@ manage_single_service_menu() {
 }
 
 verify_all_configs() {
-  local checked=0
+  local checked=0 failed=0
 
   if [[ -x "${INSTALL_DIR}/frps" && -f "$FRPS_CONFIG" ]]; then
-    verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"
     checked=1
+    verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG" || failed=1
   else
     warn "跳过 frps：未同时检测到 ${INSTALL_DIR}/frps 和 $FRPS_CONFIG。"
   fi
 
   if [[ -x "${INSTALL_DIR}/frpc" && -f "$FRPC_CONFIG" ]]; then
-    verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
     checked=1
+    verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG" || failed=1
   else
     warn "跳过 frpc：未同时检测到 ${INSTALL_DIR}/frpc 和 $FRPC_CONFIG。"
   fi
 
   if (( checked == 0 )); then
     warn "没有可校验的 frp 配置。"
+  elif (( failed != 0 )); then
+    warn "部分配置校验失败，请先修复配置。"
   else
     ok "配置校验完成。"
   fi
+  return 0
 }
 
 redact_config_stream() {
@@ -3009,7 +3083,7 @@ edit_config_file() {
         cp -a "$backup" "$file"
         ok "已恢复：$backup"
       fi
-      return 1
+      return 0
     fi
   fi
 
@@ -3177,14 +3251,14 @@ MENU_FIX_LOGS
       patch_log_config_file "$FRPS_CONFIG" "${LOG_DIR}/frps.log" "frps"
       touch "${LOG_DIR}/frps.log" 2>/dev/null || true
       chown "$FRP_USER":"$FRP_USER" "${LOG_DIR}/frps.log" 2>/dev/null || true
-      verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"
+      verify_config_before_restart "${INSTALL_DIR}/frps" "$FRPS_CONFIG" || return 0
       restart_services+=(frps)
       ;;
     2|frpc)
       patch_log_config_file "$FRPC_CONFIG" "${LOG_DIR}/frpc.log" "frpc"
       touch "${LOG_DIR}/frpc.log" 2>/dev/null || true
       chown "$FRP_USER":"$FRP_USER" "${LOG_DIR}/frpc.log" 2>/dev/null || true
-      verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
+      verify_config_before_restart "${INSTALL_DIR}/frpc" "$FRPC_CONFIG" || return 0
       restart_services+=(frpc)
       ;;
     3|all|全部)
@@ -3192,8 +3266,8 @@ MENU_FIX_LOGS
       patch_log_config_file "$FRPC_CONFIG" "${LOG_DIR}/frpc.log" "frpc"
       touch "${LOG_DIR}/frps.log" "${LOG_DIR}/frpc.log" 2>/dev/null || true
       chown "$FRP_USER":"$FRP_USER" "${LOG_DIR}/frps.log" "${LOG_DIR}/frpc.log" 2>/dev/null || true
-      verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"
-      verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
+      verify_config_before_restart "${INSTALL_DIR}/frps" "$FRPS_CONFIG" || return 0
+      verify_config_before_restart "${INSTALL_DIR}/frpc" "$FRPC_CONFIG" || return 0
       restart_services+=(frps frpc)
       ;;
     0|q|Q) return 0 ;;
@@ -3283,12 +3357,12 @@ run_cli() {
     --import-frps-code)
       need_root
       load_installer_config
-      import_frps_pairing_code "${2:-}" "${3:-}"
+      import_frps_pairing_code "${2:-}" "${3:-}" "true"
       ;;
     --import-xtcp-code)
       need_root
       load_installer_config
-      import_xtcp_code_to_visitor "${2:-}" "${3:-}"
+      import_xtcp_code_to_visitor "${2:-}" "${3:-}" "true"
       ;;
     --xtcp-summary)
       [[ -n "${2:-}" ]] || fatal "缺少 XTCP 配置文件或目录路径。"
