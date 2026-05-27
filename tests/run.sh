@@ -150,6 +150,8 @@ test_named_instance_lifecycle_helpers() {
   mkdir -p "$FRPC_CLIENTS_DIR"
   empty_instances="$(render_frpc_instance_list)"
   assert_contains '没有命名 frpc 实例' <(printf '%s\n' "$empty_instances") "empty instance list explains next step"
+  assert_contains '客户端 -> 实例 -> 新建/重配实例' <(printf '%s\n' "$empty_instances") "empty instance list uses absolute menu path"
+  assert_not_contains '选择 2)' <(printf '%s\n' "$empty_instances") "empty instance list avoids relative menu number"
   FRPC_CLIENTS_DIR="$old_clients_dir"
 
   local service_path="${TMP_DIR}/frpc@.service"
@@ -176,6 +178,30 @@ test_config_edit_helpers() {
 
   EDITOR="/bin/true"
   assert_eq "/bin/true" "$(choose_editor)" "editor selected from EDITOR"
+
+  local old_clients_dir empty_config_output ask_count_file
+  old_clients_dir="$FRPC_CLIENTS_DIR"
+  FRPC_CLIENTS_DIR="${TMP_DIR}/empty-config-clients"
+  mkdir -p "$FRPC_CLIENTS_DIR"
+  ask_count_file="${TMP_DIR}/empty-config-ask-count"
+  printf '0' > "$ask_count_file"
+  empty_config_output="$(
+    (
+      ask() {
+        local n
+        n="$(cat "$ask_count_file")"
+        n=$((n + 1))
+        printf '%s' "$n" > "$ask_count_file"
+        if (( n == 1 )); then printf '2'; else printf '0'; fi
+      }
+      ask_required() { fail "frpc_config_menu should not ask instance name when no instances exist"; }
+      pause() { return 0; }
+      frpc_config_menu
+    ) 2>&1
+  )"
+  assert_contains '没有命名 frpc 实例' <(printf '%s\n' "$empty_config_output") "frpc config named instance stops early when no instances exist"
+  assert_contains '客户端 -> 实例 -> 新建/重配实例' <(printf '%s\n' "$empty_config_output") "frpc config named instance gives absolute create path"
+  FRPC_CLIENTS_DIR="$old_clients_dir"
 }
 
 test_verify_config_behavior() {

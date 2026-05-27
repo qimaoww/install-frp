@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.28-r18}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.28-r19}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -1054,12 +1054,16 @@ list_frpc_instances() {
   done
 }
 
+render_no_frpc_instances_hint() {
+  printf '没有命名 frpc 实例。\n'
+  printf '下一步：客户端 -> 实例 -> 新建/重配实例，或 客户端 -> 接入码 导入为 instance:<name>。\n'
+}
+
 render_frpc_instance_list() {
   local instances=() name service config split_dir
   mapfile -t instances < <(list_frpc_instances)
   if (( ${#instances[@]} == 0 )); then
-    printf '没有命名 frpc 实例。\n'
-    printf '下一步：选择 2) 新建/重配实例。\n'
+    render_no_frpc_instances_hint
     return 0
   fi
 
@@ -2871,7 +2875,7 @@ frpc_config_menu() {
     ui_menu_item 1 "默认 frpc"
     ui_menu_item 2 "命名实例"
     ui_menu_back
-    local choice name
+    local choice name instances=()
     choice="$(ask "请选择" "1")"
     case "$choice" in
       1|default|frpc)
@@ -2882,12 +2886,18 @@ frpc_config_menu() {
         frpc_config_target_menu_direct
         ;;
       2|instance)
+        mapfile -t instances < <(list_frpc_instances)
+        if (( ${#instances[@]} == 0 )); then
+          render_no_frpc_instances_hint
+          pause
+          continue
+        fi
+        render_frpc_instance_list
         name="$(ask_required "实例名" "")"
         validate_instance_name "$name" || { warn "实例名不合法：$name"; pause; continue; }
         if [[ ! -f "$(instance_frpc_config "$name")" ]]; then
           warn "命名 frpc 实例不存在或未完成配置：$(instance_frpc_config "$name")"
-          render_frpc_instance_list
-          warn "下一步：选择 客户端 -> 实例 -> 新建/重配实例，或用接入码导入。"
+          warn "上面是当前已有实例；要创建新实例，请到 客户端 -> 实例 -> 新建/重配实例，或 客户端 -> 接入码 导入为 instance:${name}。"
           pause
           continue
         fi
@@ -2904,7 +2914,7 @@ frpc_config_menu() {
 }
 
 select_existing_frpc_target() {
-  local target name config
+  local target name config instances=()
   echo "选择客户端：1) 默认 frpc  2) 命名 frpc 实例"
   target="$(ask "请选择" "1")"
   case "$target" in
@@ -2917,13 +2927,17 @@ select_existing_frpc_target() {
       SELECTED_FRPC_LOG_FILE="${LOG_DIR}/frpc.log"
       ;;
     2|instance)
+      mapfile -t instances < <(list_frpc_instances)
+      if (( ${#instances[@]} == 0 )); then
+        render_no_frpc_instances_hint
+        return 1
+      fi
       render_frpc_instance_list
       name="$(ask_required "实例名" "")"
       validate_instance_name "$name" || { warn "实例名不合法：$name"; return 1; }
       config="$(instance_frpc_config "$name")"
       if [[ ! -f "$config" ]]; then
         warn "命名 frpc 实例不存在或未完成配置：$config"
-        render_frpc_instance_list
         return 1
       fi
       SELECTED_FRPC_LABEL="实例 ${name}"
@@ -2937,7 +2951,12 @@ select_existing_frpc_target() {
 }
 
 select_existing_named_frpc_target() {
-  local name config
+  local name config instances=()
+  mapfile -t instances < <(list_frpc_instances)
+  if (( ${#instances[@]} == 0 )); then
+    render_no_frpc_instances_hint
+    return 1
+  fi
   render_frpc_instance_list
   name="$(ask_required "实例名" "")"
   validate_instance_name "$name" || { warn "实例名不合法：$name"; return 1; }
