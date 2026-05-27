@@ -45,6 +45,13 @@ sudo bash frp.sh
 
 ## 主菜单
 
+菜单顶部会显示当前状态栏，脚本会读取本机二进制、配置和 systemd 服务状态：
+
+```text
+状态：frps: v0.68.1 | 配置已存在 | 服务active/enabled
+      frpc: v0.68.1 | 配置已存在 | 服务inactive/disabled | 命名实例 2
+```
+
 ```text
 1) frps 服务端管理
 2) frpc 客户端管理
@@ -79,6 +86,8 @@ sudo bash frp.sh
 /etc/frp/frps.toml
 /etc/systemd/system/frps.service
 ```
+
+安装/更新时会先读取本机已安装版本。如果目标版本和本机版本一致，默认跳过二进制下载；需要强制覆盖时按提示选择重新下载。
 
 ### 导出 frpc 加密接入码
 

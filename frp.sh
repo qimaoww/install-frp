@@ -301,6 +301,8 @@ ${C_BOLD}==================================================
        支持 TOML / systemd / frps / frpc
 ==================================================${C_RESET}
 BANNER
+  render_status_bar
+  echo
 }
 
 install_dependencies() {
@@ -349,7 +351,7 @@ detect_arch() {
   esac
 }
 
-get_latest_version() {
+fetch_latest_version_tag() {
   load_installer_config
   local tag json api_url
   api_url="$(apply_github_proxy "$GH_API")"
@@ -359,19 +361,102 @@ get_latest_version() {
     json="$(curl -fsSL --connect-timeout 15 --retry 2 --retry-delay 1 "$GH_API" 2>/dev/null || true)"
   fi
   tag="$(printf '%s' "$json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(v[0-9][^"]*\)".*/\1/p' | head -n1)"
+  [[ -n "$tag" ]] || return 1
+  printf '%s' "$tag"
+}
+
+get_latest_version() {
+  local tag
+  tag="$(fetch_latest_version_tag || true)"
   [[ -n "$tag" ]] || fatal "获取 frp 最新版本失败，可以手动输入版本，例如 v0.68.1，或先配置 GitHub 代理。"
   printf '%s' "$tag"
 }
-select_version() {
-  local default_version version
-  default_version="${VERSION:-}"
-  if [[ -z "$default_version" ]]; then
-    info "正在获取 frp 最新版本..."
-    default_version="$(get_latest_version)"
-  fi
-  version="$(ask "请输入 frp 版本，保留默认即最新" "$default_version")"
+
+normalize_version_tag() {
+  local text="${1:-}" version
+  version="$(printf '%s' "$text" | grep -Eo 'v?[0-9]+([.][0-9]+){1,3}([-+._A-Za-z0-9]*)?' | head -n1 || true)"
+  [[ -n "$version" ]] || return 1
   [[ "$version" =~ ^v ]] || version="v${version}"
   printf '%s' "$version"
+}
+
+resolve_default_version() {
+  local explicit="${1:-}" installed="${2:-}" latest="${3:-}" default_version
+  if [[ -n "$explicit" ]]; then
+    default_version="$explicit"
+  elif [[ -n "$latest" ]]; then
+    default_version="$latest"
+  else
+    default_version="$installed"
+  fi
+  [[ -n "$default_version" ]] || return 1
+  normalize_version_tag "$default_version"
+}
+
+select_version() {
+  local default_version version installed_version latest_version
+  installed_version="$(installed_frp_version)"
+  if [[ -n "$installed_version" ]]; then
+    info "检测到本机已安装 frp：${installed_version}"
+  fi
+
+  if [[ -z "${VERSION:-}" ]]; then
+    info "正在获取 frp 最新版本..."
+    latest_version="$(fetch_latest_version_tag || true)"
+    if [[ -z "$latest_version" && -n "$installed_version" ]]; then
+      warn "获取最新版本失败，将默认使用本机已安装版本 ${installed_version}。"
+    elif [[ -z "$latest_version" ]]; then
+      fatal "获取 frp 最新版本失败，可以手动输入 VERSION=v0.68.1，或先配置 GitHub 代理。"
+    fi
+  fi
+
+  default_version="$(resolve_default_version "${VERSION:-}" "$installed_version" "$latest_version")"
+  version="$(ask "请输入 frp 版本，保留默认；当前已安装 ${installed_version:-无}" "$default_version")"
+  [[ "$version" =~ ^v ]] || version="v${version}"
+  printf '%s' "$version"
+}
+
+binary_version_tag() {
+  local bin="$1" text
+  [[ -x "$bin" ]] || return 1
+  text="$(frp_version_text "$bin")"
+  normalize_version_tag "$text"
+}
+
+installed_frp_version() {
+  local frps_version="" frpc_version=""
+  frps_version="$(binary_version_tag "${INSTALL_DIR}/frps" 2>/dev/null || true)"
+  frpc_version="$(binary_version_tag "${INSTALL_DIR}/frpc" 2>/dev/null || true)"
+
+  if [[ -n "$frps_version" && "$frps_version" == "$frpc_version" ]]; then
+    printf '%s' "$frps_version"
+  elif [[ -n "$frps_version" && -n "$frpc_version" ]]; then
+    printf 'frps %s / frpc %s' "$frps_version" "$frpc_version"
+  else
+    printf '%s' "${frps_version:-$frpc_version}"
+  fi
+}
+
+should_skip_frp_download() {
+  local target_version="$1" reinstall_answer="${2:-}" frps_version="" frpc_version="" installed_version
+  target_version="$(normalize_version_tag "$target_version")"
+  frps_version="$(binary_version_tag "${INSTALL_DIR}/frps" 2>/dev/null || true)"
+  frpc_version="$(binary_version_tag "${INSTALL_DIR}/frpc" 2>/dev/null || true)"
+  [[ -n "$frps_version" && -n "$frpc_version" ]] || return 1
+  [[ "$frps_version" == "$frpc_version" && "$frps_version" == "$target_version" ]] || return 1
+  installed_version="$frps_version"
+
+  if [[ -n "$reinstall_answer" ]]; then
+    [[ "$reinstall_answer" =~ ^[Nn]$ ]]
+    return
+  fi
+
+  warn "检测到本机已安装 frp ${installed_version}，与目标版本相同。"
+  if confirm "是否仍然重新下载并覆盖安装" "n"; then
+    return 1
+  fi
+  ok "已跳过二进制下载，继续使用本机 frp ${installed_version}。"
+  return 0
 }
 
 create_dirs_and_user() {
@@ -519,6 +604,49 @@ frp_version_text() {
   [[ -n "$out" ]] || out="$("$bin" -v 2>/dev/null || true)"
   [[ -n "$out" ]] || out="$("$bin" --version 2>/dev/null || true)"
   printf '%s' "$out"
+}
+
+service_status_label() {
+  local service="$1" active="" enabled=""
+  has_cmd systemctl || { printf '服务状态未知'; return 0; }
+  if ! systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
+    printf '服务未安装'
+    return 0
+  fi
+  active="$(systemctl is-active "$service" 2>/dev/null || true)"
+  enabled="$(systemctl is-enabled "$service" 2>/dev/null || true)"
+  [[ -n "$active" ]] || active="unknown"
+  [[ -n "$enabled" ]] || enabled="unknown"
+  printf '服务%s/%s' "$active" "$enabled"
+}
+
+config_status_label() {
+  local conf="$1"
+  if [[ -s "$conf" ]]; then
+    printf '配置已存在'
+  elif [[ -f "$conf" ]]; then
+    printf '配置空文件'
+  else
+    printf '配置未生成'
+  fi
+}
+
+render_component_status() {
+  local name="$1" bin="$2" conf="$3" service="$4" version config_state service_state
+  version="$(binary_version_tag "$bin" 2>/dev/null || true)"
+  [[ -n "$version" ]] || version="未安装"
+  config_state="$(config_status_label "$conf")"
+  service_state="$(service_status_label "$service")"
+  printf '%s: %s | %s | %s' "$name" "$version" "$config_state" "$service_state"
+}
+
+render_status_bar() {
+  local instance_count
+  instance_count="$(list_frpc_instances 2>/dev/null | wc -l | tr -d '[:space:]')"
+  cat <<EOF_STATUS
+状态：$(render_component_status "frps" "${INSTALL_DIR}/frps" "$FRPS_CONFIG" "frps")
+      $(render_component_status "frpc" "${INSTALL_DIR}/frpc" "$FRPC_CONFIG" "frpc") | 命名实例 ${instance_count}
+EOF_STATUS
 }
 
 validate_instance_name() {
@@ -815,6 +943,9 @@ install_or_update_binaries() {
   create_dirs_and_user
   local version
   version="$(select_version)"
+  if should_skip_frp_download "$version"; then
+    return 0
+  fi
   download_and_install_frp "$version"
 }
 
@@ -2035,6 +2166,8 @@ frps_management_menu() {
   while true; do
     echo
     info "frps 服务端管理"
+    render_component_status "frps" "${INSTALL_DIR}/frps" "$FRPS_CONFIG" "frps"
+    echo
     cat <<'MENU_FRPS'
 1) 安装/更新 frps 服务端
 2) 管理 frps systemd 服务
@@ -2063,6 +2196,8 @@ frpc_management_menu() {
   while true; do
     echo
     info "frpc 客户端管理"
+    render_component_status "frpc" "${INSTALL_DIR}/frpc" "$FRPC_CONFIG" "frpc"
+    echo
     cat <<'MENU_FRPC'
 1) 安装/更新默认 frpc 客户端
 2) 管理命名 frpc 实例

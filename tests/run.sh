@@ -9,6 +9,7 @@ export FRP_LIB_ONLY=1
 # shellcheck source=/dev/null
 source "${ROOT_DIR}/frp.sh"
 
+INSTALL_DIR="${TMP_DIR}/usr/local/bin"
 CONFIG_DIR="${TMP_DIR}/etc/frp"
 FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
 PRESET_DIR="${CONFIG_DIR}/presets.d"
@@ -238,6 +239,57 @@ test_frps_pairing_code_helpers() {
   assert_contains 'server-token#frag' "$token_path" "paired token file"
 }
 
+test_install_state_and_status_bar() {
+  require_function normalize_version_tag
+  require_function binary_version_tag
+  require_function installed_frp_version
+  require_function should_skip_frp_download
+  require_function render_component_status
+  require_function render_status_bar
+  require_function resolve_default_version
+
+  assert_eq "v0.68.1" "$(normalize_version_tag "0.68.1")" "plain version normalized"
+  assert_eq "v0.69.0" "$(normalize_version_tag "frp 0.69.0")" "version text normalized"
+  assert_eq "v0.70.0" "$(resolve_default_version "v0.70.0" "v0.68.1" "v0.69.0")" "explicit version wins"
+  assert_eq "v0.69.0" "$(resolve_default_version "" "v0.68.1" "v0.69.0")" "latest version wins over installed"
+  assert_eq "v0.68.1" "$(resolve_default_version "" "v0.68.1" "")" "installed version used when latest missing"
+
+  mkdir -p "$INSTALL_DIR" "$CONFIG_DIR"
+  cat > "${INSTALL_DIR}/frps" <<'EOF_FAKE_FRPS'
+#!/usr/bin/env bash
+echo "0.68.1"
+EOF_FAKE_FRPS
+  cat > "${INSTALL_DIR}/frpc" <<'EOF_FAKE_FRPC'
+#!/usr/bin/env bash
+echo "0.68.1"
+EOF_FAKE_FRPC
+  chmod +x "${INSTALL_DIR}/frps" "${INSTALL_DIR}/frpc"
+  printf 'bindPort = 7000\n' > "$FRPS_CONFIG"
+  printf 'serverPort = 7000\n' > "$FRPC_CONFIG"
+
+  assert_eq "v0.68.1" "$(binary_version_tag "${INSTALL_DIR}/frps")" "frps binary version detected"
+  assert_eq "v0.68.1" "$(installed_frp_version)" "installed pair version detected"
+  should_skip_frp_download "v0.68.1" "n" >/dev/null || fail "same version should skip when reinstall not confirmed"
+  ! should_skip_frp_download "v0.69.0" "n" >/dev/null 2>&1 || fail "different version should not skip"
+  rm -f "${INSTALL_DIR}/frpc"
+  ! should_skip_frp_download "v0.68.1" "n" >/dev/null 2>&1 || fail "partial install should not skip download"
+  cat > "${INSTALL_DIR}/frpc" <<'EOF_FAKE_FRPC_RESTORE'
+#!/usr/bin/env bash
+echo "0.68.1"
+EOF_FAKE_FRPC_RESTORE
+  chmod +x "${INSTALL_DIR}/frpc"
+
+  local frps_status status_bar
+  frps_status="$(render_component_status "frps" "${INSTALL_DIR}/frps" "$FRPS_CONFIG" "frps")"
+  [[ "$frps_status" == *"frps: v0.68.1"* ]] || fail "frps status missing version: ${frps_status}"
+  [[ "$frps_status" == *"配置已存在"* ]] || fail "frps status missing config state: ${frps_status}"
+
+  status_bar="$(render_status_bar)"
+  [[ "$status_bar" == *"状态："* ]] || fail "status bar missing title"
+  [[ "$status_bar" == *"frps: v0.68.1"* ]] || fail "status bar missing frps version"
+  [[ "$status_bar" == *"frpc: v0.68.1"* ]] || fail "status bar missing frpc version"
+}
+
 main() {
   bash -n "${ROOT_DIR}/frp.sh"
   pass "frp.sh syntax"
@@ -248,6 +300,7 @@ main() {
   test_config_edit_helpers
   test_xtcp_import_code_helpers
   test_frps_pairing_code_helpers
+  test_install_state_and_status_bar
   printf 'All %d tests passed.\n' "$pass_count"
 }
 
