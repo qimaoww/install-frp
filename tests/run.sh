@@ -356,6 +356,7 @@ EOF_FAKE_FRPC_RESTORE
   import_cmd="$(render_one_click_import_command "xtcp" "IFRP-XTCP-V1:abc" "pa ss'word")"
   assert_contains '--import-xtcp-code' <(printf '%s\n' "$import_cmd") "xtcp one-click command uses cli import"
   assert_contains "'pa ss'\\''word'" <(printf '%s\n' "$import_cmd") "one-click command quotes passphrase"
+  ! printf '%s\n' "$import_cmd" | grep -Fq '/refs/heads/main/' || fail "one-click command should avoid stale refs/heads raw cache"
   declare -f export_frps_pairing_code | grep -Fq 'render_one_click_import_command "frps"' || fail "frps export should print one-click import command"
   declare -f create_xtcp_exposed_and_code | grep -Fq 'render_one_click_import_command "xtcp"' || fail "xtcp export should print one-click import command"
 
