@@ -199,7 +199,7 @@ EOF_DEFAULT_FRPC
       confirm() { [[ "$1" == 是否现在启动* ]]; }
       verify_config() { printf 'verify:%s\n' "$2"; return 0; }
       write_frpc_template_service() { printf 'template-service\n'; }
-      systemctl_enable_restart() { printf 'enable-restart:%s\n' "$1"; }
+      systemctl_enable_restart() { SERVICE_ACTION_STATUS=0; printf 'enable-restart:%s\n' "$1"; }
       service_exists() { return 0; }
       service_action() { printf 'service:%s:%s\n' "$1" "$2"; }
       copy_default_frpc_to_instance
@@ -215,6 +215,32 @@ EOF_DEFAULT_FRPC
   assert_contains 'path = "'"${instance_store}"'"' "$instance_config" "copy default frpc rewrites store path"
   assert_contains 'secret-token' "$instance_token" "copy default frpc copies token file"
   assert_contains 'name = "ssh"' "${instance_split}/ssh.toml" "copy default frpc copies split proxy config"
+
+  local failed_start_output
+  failed_start_output="$(
+    (
+      INSTALL_DIR="${migrate_root}/usr/local/bin"
+      CONFIG_DIR="${migrate_root}/etc/frp"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${migrate_root}/var/log/frp"
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      FRPC_STORE="${CONFIG_DIR}/frpc-store.json"
+      ask_required() { printf 'failed'; }
+      confirm() { return 0; }
+      verify_config() { return 0; }
+      write_frpc_template_service() { :; }
+      systemctl_enable_restart() { SERVICE_ACTION_STATUS=1; printf 'enable-restart:%s\n' "$1"; }
+      service_exists() { [[ "$1" == "frpc" ]]; }
+      service_action() { printf 'service:%s:%s\n' "$1" "$2"; }
+      copy_default_frpc_to_instance
+    ) 2>&1
+  )"
+  assert_contains 'enable-restart:frpc@failed' <(printf '%s\n' "$failed_start_output") "copy default frpc attempts to start failed named instance"
+  assert_not_contains 'service:frpc:stop' <(printf '%s\n' "$failed_start_output") "copy default frpc does not stop default when named instance start fails"
+  assert_not_contains 'service:frpc:disable' <(printf '%s\n' "$failed_start_output") "copy default frpc does not disable default when named instance start fails"
 
   local instance_menu
   instance_menu="$(declare -f manage_frpc_instances_menu)"
@@ -532,6 +558,26 @@ test_import_targets_and_safe_failures() {
   assert_contains '无法管理 frpc' <(printf '%s\n' "$missing_systemd_output") "enable restart reports missing systemctl"
   assert_not_contains '已启动并设置开机自启' <(printf '%s\n' "$missing_systemd_output") "enable restart does not claim success without systemctl"
 
+  local inactive_output
+  inactive_output="$(
+    (
+      has_cmd() { [[ "$1" == "systemctl" ]]; }
+      service_exists() { return 0; }
+      systemctl() {
+        case "$1" in
+          enable|restart|list-unit-files|is-enabled|show) return 0 ;;
+          is-active) return 3 ;;
+          *) return 0 ;;
+        esac
+      }
+      systemctl_enable_restart frpc
+      printf 'status:%s\n' "$SERVICE_ACTION_STATUS"
+    ) 2>&1
+  )"
+  assert_contains '未处于 active 状态' <(printf '%s\n' "$inactive_output") "enable restart checks service active state"
+  assert_contains 'status:1' <(printf '%s\n' "$inactive_output") "enable restart marks inactive service as failed"
+  assert_not_contains '已启动并设置开机自启' <(printf '%s\n' "$inactive_output") "enable restart does not claim success for inactive service"
+
   local cli_status cli_output
   cli_status=0
   if cli_output="$(
@@ -575,6 +621,24 @@ test_import_targets_and_safe_failures() {
   )"
   assert_contains '重启失败' <(printf '%s\n' "$restart_output") "restart helper reports service restart failure"
   assert_not_contains '已重启' <(printf '%s\n' "$restart_output") "restart helper does not claim success after failure"
+
+  (
+    has_cmd() { [[ "$1" == "systemctl" ]]; }
+    systemctl() {
+      [[ "$1" == "list-unit-files" && "$2" == "frpc@.service" ]]
+    }
+    service_exists frpc@cmcc
+  ) || fail "templated frpc@ instance should exist when frpc@.service exists"
+  pass "templated frpc@ instance service is detected from template unit"
+
+  (
+    has_cmd() { [[ "$1" == "systemctl" ]]; }
+    systemctl() {
+      [[ "$1" == "list-unit-files" && "$2" == "foo@.service" ]]
+    }
+    ! service_exists foo@bar
+  ) || fail "non-frpc templated services should not be detected from arbitrary templates"
+  pass "service_exists only uses template fallback for frpc@ instances"
 
   local pair_payload pair_code xtcp_payload xtcp_code existing_output existing_status
   pair_payload="$(render_frpc_pairing_payload "frps.example.com" "7000" "token" "tcp" "true" "0" "" "")"

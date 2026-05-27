@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.28-r20}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.28-r22}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -658,11 +658,16 @@ systemctl_enable_restart() {
   (( SERVICE_ACTION_STATUS == 0 )) || failed=1
   service_action "$service" restart "false"
   (( SERVICE_ACTION_STATUS == 0 )) || failed=1
+  if (( failed == 0 )) && ! systemctl is-active --quiet "$service" >/dev/null 2>&1; then
+    failed=1
+    warn "${service} 未处于 active 状态，请查看日志。"
+  fi
   if (( failed == 0 )); then
     ok "${service} 已启动并设置开机自启。"
   else
     warn "${service} 启动或自启设置失败，请查看日志。"
   fi
+  SERVICE_ACTION_STATUS="$failed"
   print_service_summary "$service"
 }
 
@@ -687,8 +692,15 @@ print_service_summary() {
 }
 
 service_exists() {
-  local service="$1"
-  has_cmd systemctl && systemctl list-unit-files "${service}.service" >/dev/null 2>&1
+  local service="$1" template
+  has_cmd systemctl || return 1
+  systemctl list-unit-files "${service}.service" >/dev/null 2>&1 && return 0
+  if [[ "$service" == frpc@* && "$service" != frpc@ ]]; then
+    template="frpc@"
+    systemctl list-unit-files "${template}.service" >/dev/null 2>&1
+    return
+  fi
+  return 1
 }
 
 service_action() {
@@ -1292,7 +1304,7 @@ rewrite_frpc_config_for_instance() {
 
 copy_default_frpc_to_instance() {
   create_dirs_and_user
-  local name dir config split_dir token_file log_file store_file service copied=0
+  local name dir config split_dir token_file log_file store_file service copied=0 instance_started=0
 
   if [[ ! -f "$FRPC_CONFIG" ]]; then
     warn "默认 frpc 主配置不存在：$FRPC_CONFIG"
@@ -1359,11 +1371,18 @@ copy_default_frpc_to_instance() {
 
   if confirm "是否现在启动/重启 ${service}" "Y"; then
     systemctl_enable_restart "$service"
+    (( ${SERVICE_ACTION_STATUS:-1} == 0 )) && instance_started=1
   fi
 
-  if service_exists frpc && confirm "是否停止并取消默认 frpc 自启，避免同一批代理重复连接" "n"; then
-    service_action frpc stop "false"
-    service_action frpc disable "false"
+  if service_exists frpc; then
+    if (( instance_started == 1 )); then
+      if confirm "是否停止并取消默认 frpc 自启，避免同一批代理重复连接" "n"; then
+        service_action frpc stop "false"
+        service_action frpc disable "false"
+      fi
+    else
+      warn "实例 ${service} 未确认启动成功，已保留默认 frpc，避免断开现有连接。"
+    fi
   fi
 
   ok "已从默认 frpc 复制为实例 ${name}：$config"
