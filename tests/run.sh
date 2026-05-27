@@ -42,13 +42,13 @@ assert_eq() {
 
 assert_contains() {
   local needle="$1" file="$2" msg="$3"
-  grep -Fq "$needle" "$file" || fail "${msg}: missing '${needle}' in ${file}"
+  grep -Fq -- "$needle" "$file" || fail "${msg}: missing '${needle}' in ${file}"
   pass "$msg"
 }
 
 assert_not_contains() {
   local needle="$1" file="$2" msg="$3"
-  if grep -Fq "$needle" "$file"; then
+  if grep -Fq -- "$needle" "$file"; then
     fail "${msg}: unexpected '${needle}' in ${file}"
   fi
   pass "$msg"
@@ -248,6 +248,14 @@ test_install_state_and_status_bar() {
   require_function render_status_bar
   require_function resolve_default_version
   require_function render_main_menu
+  require_function render_frps_menu
+  require_function render_frpc_menu
+  require_function curl_download
+  require_function print_service_summary
+  require_function restart_service_if_present
+  require_function shell_quote
+  require_function render_one_click_import_command
+  require_function run_cli
 
   assert_eq "v0.68.1" "$(normalize_version_tag "0.68.1")" "plain version normalized"
   assert_eq "v0.69.0" "$(normalize_version_tag "frp 0.69.0")" "version text normalized"
@@ -301,6 +309,27 @@ EOF_FAKE_FRPC_RESTORE
   ! printf '%s\n' "$menu" | grep -Fq 'frps ' || fail "main menu should use short labels"
   ! printf '%s\n' "$menu" | grep -Fq 'frpc ' || fail "main menu should use short labels"
   ! printf '%s\n' "$menu" | grep -Fq '10)' || fail "main menu should not expose ten top-level entries"
+
+  local frpc_menu frps_menu
+  frpc_menu="$(render_frpc_menu)"
+  frps_menu="$(render_frps_menu)"
+  assert_contains '1) 安装/更新' <(printf '%s\n' "$frpc_menu") "frpc menu has short install entry"
+  assert_contains '2) 启动/停止/重启' <(printf '%s\n' "$frpc_menu") "frpc menu exposes restart management"
+  assert_contains '5) 代理配置' <(printf '%s\n' "$frpc_menu") "frpc menu has short proxy entry"
+  ! printf '%s\n' "$frpc_menu" | grep -Fq '默认 frpc 客户端' || fail "frpc menu should not repeat long default client text"
+  ! printf '%s\n' "$frpc_menu" | grep -Fq 'systemd 服务' || fail "frpc menu should use short service text"
+  assert_contains '2) 启动/停止/重启' <(printf '%s\n' "$frps_menu") "frps menu exposes restart management"
+  assert_contains '3) 接入码' <(printf '%s\n' "$frps_menu") "frps menu has short pairing entry"
+  ! declare -f curl_download | grep -Fq 'curl -fL ' || fail "curl download should be silent and not show progress meter"
+  ! grep -Fq 'systemctl --no-pager --full status' "${ROOT_DIR}/frp.sh" || fail "script should not dump full systemd status in normal flow"
+  declare -f create_xtcp_exposed_and_code | grep -Fq 'restart_service_if_present "$SELECTED_FRPC_SERVICE"' || fail "xtcp exposed setup should restart/register exposed proxy"
+
+  local import_cmd
+  import_cmd="$(render_one_click_import_command "xtcp" "IFRP-XTCP-V1:abc" "pa ss'word")"
+  assert_contains '--import-xtcp-code' <(printf '%s\n' "$import_cmd") "xtcp one-click command uses cli import"
+  assert_contains "'pa ss'\\''word'" <(printf '%s\n' "$import_cmd") "one-click command quotes passphrase"
+  declare -f export_frps_pairing_code | grep -Fq 'render_one_click_import_command "frps"' || fail "frps export should print one-click import command"
+  declare -f create_xtcp_exposed_and_code | grep -Fq 'render_one_click_import_command "xtcp"' || fail "xtcp export should print one-click import command"
 }
 
 main() {

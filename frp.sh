@@ -5,7 +5,8 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r3}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r5}"
+SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/refs/heads/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/frp}"
@@ -56,6 +57,11 @@ need_root() {
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 pause() { read -r -p "按回车继续..." _ || true; }
+
+menu_title() {
+  clear 2>/dev/null || true
+  printf '%s\n' "$1"
+}
 
 trim() {
   local s="$*"
@@ -229,6 +235,26 @@ decrypt_payload_code() {
     *) fatal "导入码前缀不正确，期望 ${prefix}:..." ;;
   esac
   printf '%s' "$cipher" | openssl enc -aes-256-cbc -pbkdf2 -d -base64 -A -pass "pass:${passphrase}"
+}
+
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+render_one_click_import_command() {
+  local kind="$1" code="$2" passphrase="$3" flag
+  case "$kind" in
+    frps) flag="--import-frps-code" ;;
+    xtcp) flag="--import-xtcp-code" ;;
+    *) fatal "未知的一键导入类型：$kind" ;;
+  esac
+  printf 'bash <(curl -fsSL %s) %s %s %s\n' \
+    "$(shell_quote "$SCRIPT_RAW_URL")" \
+    "$flag" \
+    "$(shell_quote "$code")" \
+    "$(shell_quote "$passphrase")"
 }
 
 parse_payload_value() {
@@ -484,12 +510,11 @@ download_and_install_frp() {
   url="$(apply_github_proxy "$direct_url")"
 
   tmpdir="$(mktemp -d)"
-  info "下载：$url"
-  if ! curl -fL --connect-timeout 15 --retry 3 --retry-delay 2 -o "${tmpdir}/${archive}" "$url"; then
+  info "下载 frp ${version} (${arch})..."
+  if ! curl_download "${tmpdir}/${archive}" "$url"; then
     if [[ -n "${GH_PROXY:-}" ]]; then
       warn "通过 GitHub 代理下载失败，尝试直连 GitHub。"
-      info "下载：$direct_url"
-      curl -fL --connect-timeout 15 --retry 3 --retry-delay 2 -o "${tmpdir}/${archive}" "$direct_url"
+      curl_download "${tmpdir}/${archive}" "$direct_url"
     else
       return 1
     fi
@@ -504,6 +529,11 @@ download_and_install_frp() {
 
   ok "frp ${version} 已安装到 ${INSTALL_DIR}"
   printf "frps: %s\n" "$(frp_version_text "${INSTALL_DIR}/frps")"
+}
+
+curl_download() {
+  local output="$1" url="$2"
+  curl -fsSL --connect-timeout 15 --retry 3 --retry-delay 2 -o "$output" "$url"
 }
 
 ensure_token_file() {
@@ -566,7 +596,46 @@ systemctl_enable_restart() {
   systemctl enable "$service" >/dev/null
   systemctl restart "$service"
   ok "${service} 已启动并设置开机自启。"
-  systemctl --no-pager --full status "$service" || true
+  print_service_summary "$service"
+}
+
+print_service_summary() {
+  local service="$1" active enabled since
+  if ! has_cmd systemctl; then
+    warn "当前系统没有 systemctl，无法读取服务状态。"
+    return 0
+  fi
+  if ! systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
+    printf '服务：%s  状态：未安装\n' "$service"
+    return 0
+  fi
+  active="$(systemctl is-active "$service" 2>/dev/null || true)"
+  enabled="$(systemctl is-enabled "$service" 2>/dev/null || true)"
+  since="$(systemctl show "$service" -p ActiveEnterTimestamp --value 2>/dev/null || true)"
+  [[ -n "$active" ]] || active="unknown"
+  [[ -n "$enabled" ]] || enabled="unknown"
+  printf '服务：%s  状态：%s  自启：%s' "$service" "$active" "$enabled"
+  [[ -n "$since" ]] && printf '  启动时间：%s' "$since"
+  printf '\n'
+}
+
+restart_service_if_present() {
+  local service="$1" prompt="${2:-是否重启 ${service} 使配置生效}" default="${3:-Y}"
+  if ! has_cmd systemctl; then
+    warn "当前系统没有 systemctl，无法重启 ${service}。"
+    return 0
+  fi
+  if ! systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
+    warn "未找到 ${service}.service；配置已写入，安装服务后再启动。"
+    return 0
+  fi
+  if confirm "$prompt" "$default"; then
+    systemctl restart "$service"
+    ok "${service} 已重启。"
+    print_service_summary "$service"
+  else
+    warn "未重启 ${service}，新配置要等下次启动后生效。"
+  fi
 }
 
 try_open_firewall_port() {
@@ -1475,16 +1544,23 @@ create_xtcp_exposed_and_code() {
   echo "$code"
   echo "========== 解密码 =========="
   echo "$passphrase"
+  echo "========== 一键导入命令（含解密码） =========="
+  render_one_click_import_command "xtcp" "$code" "$passphrase"
   echo "===================================="
+  restart_service_if_present "$SELECTED_FRPC_SERVICE"
 }
 
 import_xtcp_code_to_visitor() {
   create_dirs_and_user
   local code passphrase payload visitor_name safe_name file
   select_frpc_split_dir_for_write || return 0
-  warn "请粘贴 XTCP 加密导入码，格式为 IFRP-XTCP-V1:..."
-  code="$(ask_required "XTCP 导入码" "")"
-  passphrase="$(ask_required "解密码" "")"
+  code="${1:-}"
+  passphrase="${2:-}"
+  if [[ -z "$code" ]]; then
+    warn "请粘贴 XTCP 加密导入码，格式为 IFRP-XTCP-V1:..."
+    code="$(ask_required "XTCP 导入码" "")"
+  fi
+  [[ -n "$passphrase" ]] || passphrase="$(ask_required "解密码" "")"
   payload="$(decrypt_payload_code "IFRP-XTCP-V1" "$passphrase" "$code")"
   visitor_name="$(parse_xtcp_payload_value "$payload" visitorName)"
   [[ -n "$visitor_name" ]] || fatal "导入码缺少 visitorName。"
@@ -1499,12 +1575,7 @@ import_xtcp_code_to_visitor() {
   fi
   write_xtcp_visitor_config_from_payload "$file" "$payload"
   verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"
-  if systemctl list-unit-files "${SELECTED_FRPC_SERVICE}.service" >/dev/null 2>&1; then
-    if confirm "是否重启 ${SELECTED_FRPC_SERVICE} 使配置生效" "Y"; then
-      systemctl restart "$SELECTED_FRPC_SERVICE"
-      systemctl --no-pager --full status "$SELECTED_FRPC_SERVICE" || true
-    fi
-  fi
+  restart_service_if_present "$SELECTED_FRPC_SERVICE"
   ok "已导入 XTCP 访问端配置：$file"
 }
 
@@ -1626,12 +1697,7 @@ write_rendered_frpc_config() {
   chown root:"$FRP_USER" "$output_file" 2>/dev/null || true
   ok "已写入：$output_file"
   verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
-  if systemctl list-unit-files frpc.service >/dev/null 2>&1; then
-    if confirm "是否重启 frpc 使配置生效" "Y"; then
-      systemctl restart frpc
-      systemctl --no-pager --full status frpc || true
-    fi
-  fi
+  restart_service_if_present frpc
 }
 
 render_custom_preset_to_file() {
@@ -1969,12 +2035,7 @@ add_proxy_manual_wizard() {
   ok "已写入：$file"
 
   verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
-  if systemctl list-unit-files frpc.service >/dev/null 2>&1; then
-    if confirm "是否重启 frpc 使配置生效" "Y"; then
-      systemctl restart frpc
-      systemctl --no-pager --full status frpc || true
-    fi
-  fi
+  restart_service_if_present frpc
 }
 
 add_proxy_wizard() {
@@ -2019,8 +2080,8 @@ show_summary() {
   echo "脚本配置：${INSTALLER_CONFIG}"
   echo
   if has_cmd systemctl; then
-    systemctl --no-pager --full status frps 2>/dev/null || true
-    systemctl --no-pager --full status frpc 2>/dev/null || true
+    print_service_summary frps
+    print_service_summary frpc
   fi
 }
 
@@ -2060,15 +2121,21 @@ export_frps_pairing_code() {
   echo "$code"
   echo "========== 解密码 =========="
   echo "$passphrase"
+  echo "========== 一键导入命令（含解密码） =========="
+  render_one_click_import_command "frps" "$code" "$passphrase"
   echo "============================================"
 }
 
 import_frps_pairing_code() {
   create_dirs_and_user
   local code passphrase payload target name config split_dir token_file log_file store_file service
-  warn "请粘贴 frps 接入配对码，格式为 IFRP-FRPC-V1:..."
-  code="$(ask_required "frps 接入配对码" "")"
-  passphrase="$(ask_required "解密码" "")"
+  code="${1:-}"
+  passphrase="${2:-}"
+  if [[ -z "$code" ]]; then
+    warn "请粘贴 frps 接入配对码，格式为 IFRP-FRPC-V1:..."
+    code="$(ask_required "frps 接入配对码" "")"
+  fi
+  [[ -n "$passphrase" ]] || passphrase="$(ask_required "解密码" "")"
   payload="$(decrypt_payload_code "IFRP-FRPC-V1" "$passphrase" "$code")"
 
   echo "导入目标：1) 默认 frpc  2) 命名 frpc 实例"
@@ -2106,32 +2173,16 @@ import_frps_pairing_code() {
 
   write_frpc_config_from_pairing_payload "$config" "$split_dir" "$token_file" "$log_file" "$store_file" "$payload"
   verify_config "${INSTALL_DIR}/frpc" "$config"
-  if systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
-    if confirm "是否重启 ${service} 使配置生效" "Y"; then
-      systemctl restart "$service"
-      systemctl --no-pager --full status "$service" || true
-    fi
-  fi
+  restart_service_if_present "$service"
   ok "已导入 frps 接入配置：$config"
 }
 
 manage_named_frpc_service_action() {
-  local name action service
+  local name service
   name="$(ask_required "实例名" "")"
   validate_instance_name "$name" || { warn "实例名不合法：$name"; return 0; }
   service="$(instance_service_name "$name")"
-  echo "操作：1) status  2) start  3) stop  4) restart  5) logs -f  6) enable  7) disable"
-  action="$(ask "请选择" "1")"
-  case "$action" in
-    1|status) systemctl --no-pager --full status "$service" || true ;;
-    2|start) systemctl start "$service"; systemctl --no-pager --full status "$service" || true ;;
-    3|stop) systemctl stop "$service" ;;
-    4|restart) systemctl restart "$service"; systemctl --no-pager --full status "$service" || true ;;
-    5|logs) journalctl -u "$service" -n 100 -f ;;
-    6|enable) systemctl enable "$service" ;;
-    7|disable) systemctl disable "$service" ;;
-    *) warn "无效选择" ;;
-  esac
+  manage_single_service_menu "$service"
 }
 
 delete_named_frpc_instance() {
@@ -2158,7 +2209,7 @@ manage_frpc_instances_menu() {
     cat <<'MENU_FRPC_INSTANCES'
 1) 列出命名 frpc 实例
 2) 新建/重配命名 frpc 实例
-3) 管理命名实例 systemd 服务
+3) 启动/停止/重启命名实例
 4) 校验命名实例配置
 5) 删除命名实例
 0) 返回
@@ -2183,63 +2234,69 @@ MENU_FRPC_INSTANCES
   done
 }
 
-frps_management_menu() {
-  while true; do
-    echo
-    info "frps 服务端管理"
-    render_component_status "frps" "${INSTALL_DIR}/frps" "$FRPS_CONFIG" "frps"
-    echo
-    cat <<'MENU_FRPS'
-1) 安装/更新 frps 服务端
-2) 管理 frps systemd 服务
-3) 校验 frps 配置
-4) 查看 frps 配置
-5) 查看 frps 日志
-6) 导出 frpc 加密接入码
+render_frps_menu() {
+  cat <<'MENU_FRPS'
+1) 安装/更新
+2) 启动/停止/重启
+3) 接入码
+4) 校验
+5) 查看
+6) 日志
 0) 返回
 MENU_FRPS
+}
+
+frps_management_menu() {
+  while true; do
+    menu_title "服务端"
+    render_component_status "frps" "${INSTALL_DIR}/frps" "$FRPS_CONFIG" "frps"
+    echo
+    render_frps_menu
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
       1) install_frps_flow; pause ;;
       2) manage_single_service_menu frps; pause ;;
-      3) verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"; pause ;;
-      4) show_config_file "$FRPS_CONFIG" "frps 主配置" "true"; pause ;;
-      5) show_service_log frps "200" "false"; pause ;;
-      6) export_frps_pairing_code; pause ;;
+      3) export_frps_pairing_code; pause ;;
+      4) verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"; pause ;;
+      5) show_config_file "$FRPS_CONFIG" "frps 主配置" "true"; pause ;;
+      6) show_service_log frps "200" "false"; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
   done
 }
 
-frpc_management_menu() {
-  while true; do
-    echo
-    info "frpc 客户端管理"
-    render_component_status "frpc" "${INSTALL_DIR}/frpc" "$FRPC_CONFIG" "frpc"
-    echo
-    cat <<'MENU_FRPC'
-1) 安装/更新默认 frpc 客户端
-2) 管理命名 frpc 实例
-3) 导入 frps 加密接入码
-4) 添加/套用默认 frpc 代理配置
-5) XTCP / STCP 加密导入码
-6) 管理默认 frpc systemd 服务
-7) 校验默认 frpc 配置
-8) 查看默认 frpc 配置
-9) 查看默认 frpc 日志
+render_frpc_menu() {
+  cat <<'MENU_FRPC'
+1) 安装/更新
+2) 启动/停止/重启
+3) 实例
+4) 接入码
+5) 代理配置
+6) XTCP
+7) 校验
+8) 查看
+9) 日志
 0) 返回
 MENU_FRPC
+}
+
+frpc_management_menu() {
+  while true; do
+    menu_title "客户端"
+    render_component_status "frpc" "${INSTALL_DIR}/frpc" "$FRPC_CONFIG" "frpc"
+    echo
+    render_frpc_menu
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
       1) install_frpc_flow; pause ;;
-      2) manage_frpc_instances_menu ;;
-      3) import_frps_pairing_code; pause ;;
-      4) add_proxy_wizard; pause ;;
-      5) xtcp_pair_menu ;;
-      6) manage_single_service_menu frpc; pause ;;
+      2) manage_single_service_menu frpc; pause ;;
+      3) manage_frpc_instances_menu ;;
+      4) import_frps_pairing_code; pause ;;
+      5) add_proxy_wizard; pause ;;
+      6) xtcp_pair_menu ;;
       7) verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"; pause ;;
       8) show_config_file "$FRPC_CONFIG" "frpc 默认主配置" "true"; show_frpc_split_configs "true"; pause ;;
       9) show_service_log frpc "200" "false"; pause ;;
@@ -2277,16 +2334,36 @@ MENU_TOOLS
 
 manage_single_service_menu() {
   local svc="$1" action
-  echo "操作：1) status  2) start  3) stop  4) restart  5) logs -f  6) enable  7) disable"
+  if ! has_cmd systemctl; then
+    warn "当前系统没有 systemctl，无法管理 ${svc}。"
+    return 0
+  fi
+  menu_title "${svc} 启动/停止/重启"
+  print_service_summary "$svc"
+  if ! systemctl list-unit-files "${svc}.service" >/dev/null 2>&1; then
+    warn "请先安装/写入 ${svc}.service。"
+    return 0
+  fi
+  cat <<'MENU_SERVICE_ACTIONS'
+1) 状态
+2) 启动
+3) 停止
+4) 重启
+5) 日志
+6) 开机自启
+7) 取消自启
+0) 返回
+MENU_SERVICE_ACTIONS
   action="$(ask "请选择" "1")"
   case "$action" in
-    1|status) systemctl --no-pager --full status "$svc" || true ;;
-    2|start) systemctl start "$svc"; systemctl --no-pager --full status "$svc" || true ;;
-    3|stop) systemctl stop "$svc" ;;
-    4|restart) systemctl restart "$svc"; systemctl --no-pager --full status "$svc" || true ;;
+    1|status) print_service_summary "$svc" ;;
+    2|start) systemctl start "$svc"; print_service_summary "$svc" ;;
+    3|stop) systemctl stop "$svc"; print_service_summary "$svc" ;;
+    4|restart) systemctl restart "$svc"; print_service_summary "$svc" ;;
     5|logs) journalctl -u "$svc" -n 100 -f ;;
-    6|enable) systemctl enable "$svc" ;;
-    7|disable) systemctl disable "$svc" ;;
+    6|enable) systemctl enable "$svc"; print_service_summary "$svc" ;;
+    7|disable) systemctl disable "$svc"; print_service_summary "$svc" ;;
+    0|q|Q) return 0 ;;
     *) warn "无效选择" ;;
   esac
 }
@@ -2476,10 +2553,7 @@ edit_config_file() {
   fi
 
   if [[ -n "$service" ]] && systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
-    if confirm "是否重启 ${service} 使配置生效" "Y"; then
-      systemctl restart "$service"
-      systemctl --no-pager --full status "$service" || true
-    fi
+    restart_service_if_present "$service"
   fi
 }
 
@@ -2818,6 +2892,58 @@ main_menu() {
   done
 }
 
+print_usage() {
+  cat <<EOF_USAGE
+用法：
+  bash frp.sh
+  bash frp.sh --import-frps-code <接入码> <解密码>
+  bash frp.sh --import-xtcp-code <导入码> <解密码>
+  bash frp.sh --service <frps|frpc|frpc@name> <status|start|stop|restart|enable|disable>
+EOF_USAGE
+}
+
+run_cli() {
+  local cmd="${1:-}" service action
+  case "$cmd" in
+    --import-frps-code)
+      need_root
+      load_installer_config
+      import_frps_pairing_code "${2:-}" "${3:-}"
+      ;;
+    --import-xtcp-code)
+      need_root
+      load_installer_config
+      import_xtcp_code_to_visitor "${2:-}" "${3:-}"
+      ;;
+    --service)
+      need_root
+      has_cmd systemctl || fatal "当前系统没有 systemctl，无法管理服务。"
+      service="${2:-}"
+      action="${3:-status}"
+      [[ -n "$service" ]] || fatal "缺少服务名。"
+      case "$action" in
+        status) print_service_summary "$service" ;;
+        start) systemctl start "$service"; print_service_summary "$service" ;;
+        stop) systemctl stop "$service"; print_service_summary "$service" ;;
+        restart) systemctl restart "$service"; print_service_summary "$service" ;;
+        enable) systemctl enable "$service"; print_service_summary "$service" ;;
+        disable) systemctl disable "$service"; print_service_summary "$service" ;;
+        *) fatal "未知服务操作：$action" ;;
+      esac
+      ;;
+    -h|--help|help)
+      print_usage
+      ;;
+    "")
+      main_menu
+      ;;
+    *)
+      print_usage
+      fatal "未知参数：$cmd"
+      ;;
+  esac
+}
+
 if [[ "${FRP_LIB_ONLY:-0}" != "1" ]]; then
-  main_menu "$@"
+  run_cli "$@"
 fi
