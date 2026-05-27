@@ -169,6 +169,10 @@ test_xtcp_import_code_helpers() {
   require_function write_xtcp_visitor_config_from_payload
   require_function tune_xtcp_config_file
   require_function render_xtcp_config_summary
+  require_function list_xtcp_config_files
+  require_function render_xtcp_path_summary
+  require_function repair_xtcp_path
+  require_function xtcp_config_check_menu
   require_function xtcp_pair_menu
 
   local payload code decoded visitor_file exposed_file
@@ -240,8 +244,25 @@ EOF_OLD_XTCP_VISITOR
   assert_contains 'protocol=quic' <(printf '%s\n' "$summary") "xtcp summary shows protocol"
   assert_contains 'keepTunnelOpen=true' <(printf '%s\n' "$summary") "xtcp summary shows keepTunnelOpen"
   assert_contains 'disableAssistedAddrs=true' <(printf '%s\n' "$summary") "xtcp summary shows nat traversal"
+
+  local xtcp_dir dir_summary xtcp_menu_body
+  xtcp_dir="${TMP_DIR}/xtcp-dir"
+  mkdir -p "$xtcp_dir"
+  cp "$old_visitor_file" "${xtcp_dir}/p2p_ssh_visitor.toml"
+  printf '[[proxies]]\nname = "plain_tcp"\ntype = "tcp"\n' > "${xtcp_dir}/plain.toml"
+  assert_eq "${xtcp_dir}/p2p_ssh_visitor.toml" "$(list_xtcp_config_files "$xtcp_dir")" "xtcp files listed from dir"
+  dir_summary="$(render_xtcp_path_summary "$xtcp_dir")"
+  assert_contains 'p2p_ssh_visitor.toml' <(printf '%s\n' "$dir_summary") "xtcp dir summary shows file name"
+  repair_xtcp_path "$xtcp_dir" "quic" "true" "5000" >/dev/null
+  assert_contains 'keepTunnelOpen = true' "${xtcp_dir}/p2p_ssh_visitor.toml" "xtcp dir repair keeps tunnel open"
+
+  xtcp_menu_body="$(declare -f xtcp_pair_menu)"
+  assert_contains '3) 检查/修复现有配置' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu uses unified check entry"
+  assert_not_contains '4) 查看 XTCP 配置摘要' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu removes separate summary entry"
+  assert_not_contains 'repair_xtcp_config_menu' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu removes single-file repair path"
+  assert_not_contains 'show_xtcp_config_summary_menu' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu removes single-file summary path"
   declare -f run_cli | grep -Fq -- '--xtcp-summary' || fail "cli should expose xtcp summary"
-  declare -f run_cli | grep -Fq -- '--repair-xtcp-file' || fail "cli should expose xtcp repair"
+  declare -f run_cli | grep -Fq -- '--repair-xtcp' || fail "cli should expose xtcp repair"
 }
 
 test_frps_pairing_code_helpers() {
@@ -291,6 +312,8 @@ test_install_state_and_status_bar() {
   require_function render_frps_menu
   require_function render_frpc_menu
   require_function curl_download
+  require_function service_exists
+  require_function service_action
   require_function print_service_summary
   require_function restart_service_if_present
   require_function shell_quote

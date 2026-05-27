@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r12}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r13}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -593,8 +593,8 @@ EOF_SERVICE
 
 systemctl_enable_restart() {
   local service="$1"
-  systemctl enable "$service" >/dev/null
-  systemctl restart "$service"
+  service_action "$service" enable "false"
+  service_action "$service" restart "false"
   ok "${service} 已启动并设置开机自启。"
   print_service_summary "$service"
 }
@@ -605,7 +605,7 @@ print_service_summary() {
     warn "当前系统没有 systemctl，无法读取服务状态。"
     return 0
   fi
-  if ! systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
+  if ! service_exists "$service"; then
     printf '服务：%s  状态：未安装\n' "$service"
     return 0
   fi
@@ -619,6 +619,52 @@ print_service_summary() {
   printf '\n'
 }
 
+service_exists() {
+  local service="$1"
+  has_cmd systemctl && systemctl list-unit-files "${service}.service" >/dev/null 2>&1
+}
+
+service_action() {
+  local service="$1" action="${2:-status}" show_summary="${3:-true}"
+  if ! has_cmd systemctl; then
+    warn "当前系统没有 systemctl，无法管理 ${service}。"
+    return 0
+  fi
+
+  case "$action" in
+    status|logs) ;;
+    start|stop|restart|enable|disable)
+      if ! service_exists "$service"; then
+        warn "未找到 ${service}.service；请先安装/写入服务。"
+        return 0
+      fi
+      ;;
+    *) fatal "未知服务操作：$action" ;;
+  esac
+
+  case "$action" in
+    status) print_service_summary "$service" ;;
+    start) systemctl start "$service" ;;
+    stop) systemctl stop "$service" ;;
+    restart) systemctl restart "$service" ;;
+    enable) systemctl enable "$service" >/dev/null ;;
+    disable) systemctl disable "$service" >/dev/null ;;
+    logs)
+      if has_cmd journalctl; then
+        journalctl -u "$service" -n 100 -f
+      else
+        warn "当前系统没有 journalctl。"
+      fi
+      ;;
+  esac
+
+  case "$action" in
+    start|stop|restart|enable|disable)
+      [[ "$show_summary" == "true" ]] && print_service_summary "$service"
+      ;;
+  esac
+}
+
 restart_service_if_present() {
   local service="$1" prompt default
   prompt="${2:-是否重启 ${service} 使配置生效}"
@@ -627,12 +673,12 @@ restart_service_if_present() {
     warn "当前系统没有 systemctl，无法重启 ${service}。"
     return 0
   fi
-  if ! systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
+  if ! service_exists "$service"; then
     warn "未找到 ${service}.service；配置已写入，安装服务后再启动。"
     return 0
   fi
   if confirm "$prompt" "$default"; then
-    systemctl restart "$service"
+    service_action "$service" restart "false"
     ok "${service} 已重启。"
     print_service_summary "$service"
   else
@@ -675,7 +721,7 @@ frp_version_text() {
 service_status_label() {
   local service="$1" active="" enabled=""
   has_cmd systemctl || { printf '服务状态未知'; return 0; }
-  if ! systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
+  if ! service_exists "$service"; then
     printf '未装服务'
     return 0
   fi
@@ -720,7 +766,7 @@ render_component_status() {
 
 service_brief_label() {
   local service="$1" active=""
-  if ! has_cmd systemctl || ! systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
+  if ! service_exists "$service"; then
     printf '未运行'
     return 0
   fi
@@ -892,11 +938,12 @@ write_frpc_config_from_pairing_payload() {
 }
 
 list_frpc_instances() {
-  local file
+  local files=() file
   [[ -d "$FRPC_CLIENTS_DIR" ]] || return 0
-  while IFS= read -r -d '' file; do
+  mapfile -d '' -t files < <(find "$FRPC_CLIENTS_DIR" -mindepth 2 -maxdepth 2 -type f -name frpc.toml -print0 2>/dev/null | sort -z)
+  for file in "${files[@]}"; do
     basename "$(dirname "$file")"
-  done < <(find "$FRPC_CLIENTS_DIR" -mindepth 2 -maxdepth 2 -type f -name frpc.toml -print0 2>/dev/null | sort -z)
+  done
 }
 
 render_frpc_template_service() {
@@ -1594,7 +1641,7 @@ tune_xtcp_config_file() {
 }
 
 render_xtcp_config_summary() {
-  local file="$1"
+  local file="${1:-}"
   [[ -f "$file" ]] || { warn "配置文件不存在：$file"; return 0; }
   awk '
     function trim(s) {
@@ -1668,6 +1715,98 @@ render_xtcp_config_summary() {
     }
     END { flush_block() }
   ' "$file"
+}
+
+xtcp_file_has_config() {
+  local file="${1:-}" found
+  [[ -f "$file" ]] || { printf 'false\n'; return 0; }
+  found="$(awk '
+    function flush_block() {
+      if (in_block && is_xtcp) found = 1
+      in_block = 0
+      is_xtcp = 0
+    }
+    BEGIN {
+      in_block = 0
+      is_xtcp = 0
+      found = 0
+    }
+    /^[[:space:]]*\[\[(visitors|proxies)\]\][[:space:]]*$/ {
+      flush_block()
+      in_block = 1
+      next
+    }
+    /^[[:space:]]*\[\[/ {
+      flush_block()
+      next
+    }
+    {
+      if (in_block && $0 ~ /^[[:space:]]*type[[:space:]]*=[[:space:]]*"xtcp"/) is_xtcp = 1
+    }
+    END {
+      flush_block()
+      print(found ? "true" : "false")
+    }
+  ' "$file")"
+  printf '%s\n' "$found"
+}
+
+list_xtcp_config_files() {
+  local path="${1:-}" files=() file
+  [[ -n "$path" ]] || return 0
+  if [[ -f "$path" ]]; then
+    if [[ "$(xtcp_file_has_config "$path")" == "true" ]]; then
+      printf '%s\n' "$path"
+    fi
+    return 0
+  fi
+  [[ -d "$path" ]] || return 0
+  mapfile -d '' -t files < <(find "$path" -maxdepth 1 -type f -name '*.toml' -print0 2>/dev/null | sort -z)
+  for file in "${files[@]}"; do
+    if [[ "$(xtcp_file_has_config "$file")" == "true" ]]; then
+      printf '%s\n' "$file"
+    fi
+  done
+}
+
+render_xtcp_path_summary() {
+  local path="${1:-}" files=() file summary
+  mapfile -t files < <(list_xtcp_config_files "$path")
+  for file in "${files[@]}"; do
+    printf '== %s ==\n' "$(basename "$file")"
+    printf '路径：%s\n' "$file"
+    summary="$(render_xtcp_config_summary "$file")"
+    if [[ -n "$summary" ]]; then
+      printf '%s\n' "$summary"
+    else
+      printf '未找到 XTCP 条目\n'
+    fi
+  done
+
+  if (( ${#files[@]} == 0 )); then
+    warn "未找到 XTCP 配置：$path"
+  fi
+}
+
+repair_xtcp_path() {
+  local path="${1:-}" protocol="${2:-quic}" disable_assisted_addrs="${3:-true}"
+  local fallback_timeout_ms="${4:-5000}" keep_tunnel_open="${5:-true}"
+  local files=() file backup
+  mapfile -t files < <(list_xtcp_config_files "$path")
+
+  if (( ${#files[@]} == 0 )); then
+    fatal "未找到 XTCP 配置：$path"
+  fi
+
+  for file in "${files[@]}"; do
+    backup="$(backup_file "$file" || true)"
+    tune_xtcp_config_file "$file" "$protocol" "$disable_assisted_addrs" "$fallback_timeout_ms" "$keep_tunnel_open"
+    if [[ -n "$backup" ]]; then
+      printf '已修复：%s（备份：%s）\n' "$file" "$backup"
+    else
+      printf '已修复：%s\n' "$file"
+    fi
+  done
 }
 
 select_frpc_split_dir_for_write() {
@@ -1774,29 +1913,37 @@ import_xtcp_code_to_visitor() {
   ok "已导入 XTCP 访问端配置：$file"
 }
 
-repair_xtcp_config_menu() {
+xtcp_config_check_menu() {
   create_dirs_and_user
   local protocol disable_assisted timeout
   select_frpc_split_dir_for_write || return 0
-  choose_frpc_split_config "$SELECTED_FRPC_SPLIT_DIR" || return 0
-  protocol="$(ask "XTCP 底层协议 quic/kcp" "quic")"
+  if ! list_xtcp_config_files "$SELECTED_FRPC_SPLIT_DIR" | grep -q .; then
+    warn "没有找到 XTCP 拆分配置：${SELECTED_FRPC_SPLIT_DIR}/*.toml"
+    return 0
+  fi
+
+  echo
+  info "当前 XTCP 配置摘要"
+  render_xtcp_path_summary "$SELECTED_FRPC_SPLIT_DIR"
+
+  protocol="$(ask "XTCP 底层协议 quic/kcp；官方默认 quic" "quic")"
   case "$protocol" in quic|kcp) ;; *) warn "未知协议，回退 quic"; protocol="quic" ;; esac
   disable_assisted="$(ask_yes_no_value "禁用辅助地址；日志里有 10.x/100.64/172.x 建议启用" "Y")"
   timeout="$(ask "fallbackTimeoutMs" "5000")"
   [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=5000
 
-  backup_file "$SELECTED_CONFIG_FILE" >/dev/null || true
-  tune_xtcp_config_file "$SELECTED_CONFIG_FILE" "$protocol" "$disable_assisted" "$timeout" "true"
-  verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"
-  render_xtcp_config_summary "$SELECTED_CONFIG_FILE"
-  restart_service_if_present "$SELECTED_FRPC_SERVICE"
-  ok "已修复 XTCP 配置：$SELECTED_CONFIG_FILE"
-}
+  if ! confirm "是否备份并修复以上 XTCP 配置" "Y"; then
+    warn "已取消修复。"
+    return 0
+  fi
 
-show_xtcp_config_summary_menu() {
-  select_frpc_split_dir_for_write || return 0
-  choose_frpc_split_config "$SELECTED_FRPC_SPLIT_DIR" || return 0
-  render_xtcp_config_summary "$SELECTED_CONFIG_FILE"
+  repair_xtcp_path "$SELECTED_FRPC_SPLIT_DIR" "$protocol" "$disable_assisted" "$timeout" "true"
+  verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"
+  echo
+  info "修复后 XTCP 配置摘要"
+  render_xtcp_path_summary "$SELECTED_FRPC_SPLIT_DIR"
+  restart_service_if_present "$SELECTED_FRPC_SERVICE"
+  ok "XTCP 配置检查/修复完成。"
 }
 
 xtcp_pair_menu() {
@@ -1806,8 +1953,7 @@ xtcp_pair_menu() {
     cat <<'MENU_XTCP_CODE'
 1) 创建被访问端 XTCP 配置并生成加密导入码
 2) 粘贴加密导入码生成访问端配置
-3) 修复现有 XTCP 配置
-4) 查看 XTCP 配置摘要
+3) 检查/修复现有配置
 0) 返回
 MENU_XTCP_CODE
     local choice
@@ -1815,8 +1961,7 @@ MENU_XTCP_CODE
     case "$choice" in
       1) create_xtcp_exposed_and_code; pause ;;
       2) import_xtcp_code_to_visitor; pause ;;
-      3) repair_xtcp_config_menu; pause ;;
-      4) show_xtcp_config_summary_menu; pause ;;
+      3) xtcp_config_check_menu; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -1877,7 +2022,7 @@ preset_list_files() {
 
 choose_preset_file() {
   local files=() file idx choice title desc
-  while IFS= read -r file; do files+=("$file"); done < <(preset_list_files)
+  mapfile -t files < <(preset_list_files)
   if (( ${#files[@]} == 0 )); then
     warn "还没有自定义预设。请先在预设管理里创建，目录：$PRESET_DIR"
     return 1
@@ -1929,7 +2074,7 @@ render_custom_preset_to_file() {
   [[ -f "$preset" ]] || fatal "预设不存在：$preset"
   echo
   info "套用自定义预设：$(preset_meta_get "$preset" "name")"
-  while IFS= read -r var; do vars+=("$var"); done < <(extract_template_vars "$preset")
+  mapfile -t vars < <(extract_template_vars "$preset")
   content="$(cat "$preset")"
 
   if (( ${#vars[@]} > 0 )); then
@@ -2418,8 +2563,8 @@ delete_named_frpc_instance() {
   [[ -d "$dir" ]] || { warn "实例目录不存在：$dir"; return 0; }
   warn "即将删除实例 ${name}，目录：$dir"
   if confirm "确认继续" "n"; then
-    systemctl stop "$service" 2>/dev/null || true
-    systemctl disable "$service" 2>/dev/null || true
+    service_action "$service" stop "false"
+    service_action "$service" disable "false"
     rm -rf "$dir"
     ok "已删除实例：$name"
   fi
@@ -2564,7 +2709,7 @@ manage_single_service_menu() {
   fi
   menu_title "${svc} 启动/停止/重启"
   print_service_summary "$svc"
-  if ! systemctl list-unit-files "${svc}.service" >/dev/null 2>&1; then
+  if ! service_exists "$svc"; then
     warn "请先安装/写入 ${svc}.service。"
     return 0
   fi
@@ -2580,13 +2725,13 @@ manage_single_service_menu() {
 MENU_SERVICE_ACTIONS
   action="$(ask "请选择" "1")"
   case "$action" in
-    1|status) print_service_summary "$svc" ;;
-    2|start) systemctl start "$svc"; print_service_summary "$svc" ;;
-    3|stop) systemctl stop "$svc"; print_service_summary "$svc" ;;
-    4|restart) systemctl restart "$svc"; print_service_summary "$svc" ;;
-    5|logs) journalctl -u "$svc" -n 100 -f ;;
-    6|enable) systemctl enable "$svc"; print_service_summary "$svc" ;;
-    7|disable) systemctl disable "$svc"; print_service_summary "$svc" ;;
+    1|status) service_action "$svc" status ;;
+    2|start) service_action "$svc" start ;;
+    3|stop) service_action "$svc" stop ;;
+    4|restart) service_action "$svc" restart ;;
+    5|logs) service_action "$svc" logs ;;
+    6|enable) service_action "$svc" enable ;;
+    7|disable) service_action "$svc" disable ;;
     0|q|Q) return 0 ;;
     *) warn "无效选择" ;;
   esac
@@ -2671,9 +2816,7 @@ show_frpc_split_configs() {
     warn "目录不存在：$FRPC_CONF_DIR"
     return 0
   fi
-  while IFS= read -r -d '' f; do
-    files+=("$f")
-  done < <(find "$FRPC_CONF_DIR" -maxdepth 1 -type f -name '*.toml' -print0 2>/dev/null | sort -z)
+  mapfile -d '' -t files < <(find "$FRPC_CONF_DIR" -maxdepth 1 -type f -name '*.toml' -print0 2>/dev/null | sort -z)
   if (( ${#files[@]} == 0 )); then
     warn "没有找到拆分代理配置：${FRPC_CONF_DIR}/*.toml"
     return 0
@@ -2776,7 +2919,7 @@ edit_config_file() {
     fi
   fi
 
-  if [[ -n "$service" ]] && systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
+  if [[ -n "$service" ]] && service_exists "$service"; then
     restart_service_if_present "$service"
   fi
 }
@@ -2785,9 +2928,7 @@ choose_frpc_split_config() {
   local dir="${1:-$FRPC_CONF_DIR}" files=() f idx choice
   SELECTED_CONFIG_FILE=""
   [[ -d "$dir" ]] || { warn "目录不存在：$dir"; return 1; }
-  while IFS= read -r -d '' f; do
-    files+=("$f")
-  done < <(find "$dir" -maxdepth 1 -type f -name '*.toml' -print0 2>/dev/null | sort -z)
+  mapfile -d '' -t files < <(find "$dir" -maxdepth 1 -type f -name '*.toml' -print0 2>/dev/null | sort -z)
   if (( ${#files[@]} == 0 )); then
     warn "没有找到配置：${dir}/*.toml"
     return 1
@@ -3011,8 +3152,10 @@ MENU_FIX_LOGS
   if confirm "是否现在重启相关服务让日志配置生效" "Y"; then
     local svc
     for svc in "${restart_services[@]}"; do
-      if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1; then
-        systemctl restart "$svc" || warn "重启 ${svc} 失败，请查看 systemd 状态。"
+      if service_exists "$svc"; then
+        service_action "$svc" restart "true"
+      else
+        warn "未找到 ${svc}.service；日志配置已写入，安装服务后再启动。"
       fi
     done
   else
@@ -3069,12 +3212,21 @@ MENU_LOGS
 }
 
 uninstall_frp() {
+  local instances=() instance service
   warn "即将卸载 frp。"
   if ! confirm "确认继续" "n"; then return; fi
-  systemctl stop frps frpc 2>/dev/null || true
-  systemctl disable frps frpc 2>/dev/null || true
-  rm -f /etc/systemd/system/frps.service /etc/systemd/system/frpc.service
-  systemctl daemon-reload 2>/dev/null || true
+  service_action frps stop "false"
+  service_action frps disable "false"
+  service_action frpc stop "false"
+  service_action frpc disable "false"
+  mapfile -t instances < <(list_frpc_instances)
+  for instance in "${instances[@]}"; do
+    service="$(instance_service_name "$instance")"
+    service_action "$service" stop "false"
+    service_action "$service" disable "false"
+  done
+  rm -f /etc/systemd/system/frps.service /etc/systemd/system/frpc.service /etc/systemd/system/frpc@.service
+  has_cmd systemctl && systemctl daemon-reload 2>/dev/null || true
   rm -f "${INSTALL_DIR}/frps" "${INSTALL_DIR}/frpc"
   if confirm "是否删除配置目录 ${CONFIG_DIR}" "n"; then
     rm -rf "$CONFIG_DIR"
@@ -3122,8 +3274,8 @@ print_usage() {
   bash frp.sh
   bash frp.sh --import-frps-code <接入码> <解密码>
   bash frp.sh --import-xtcp-code <导入码> <解密码>
-  bash frp.sh --xtcp-summary <配置文件>
-  bash frp.sh --repair-xtcp-file <配置文件> [quic|kcp] [fallbackTimeoutMs]
+  bash frp.sh --xtcp-summary <配置文件或目录>
+  bash frp.sh --repair-xtcp <配置文件或目录> [quic|kcp] [fallbackTimeoutMs]
   bash frp.sh --service <frps|frpc|frpc@name> <status|start|stop|restart|enable|disable>
 EOF_USAGE
 }
@@ -3142,13 +3294,14 @@ run_cli() {
       import_xtcp_code_to_visitor "${2:-}" "${3:-}"
       ;;
     --xtcp-summary)
-      render_xtcp_config_summary "${2:-}"
+      [[ -n "${2:-}" ]] || fatal "缺少 XTCP 配置文件或目录路径。"
+      render_xtcp_path_summary "${2:-}"
       ;;
-    --repair-xtcp-file)
+    --repair-xtcp)
       need_root
-      [[ -n "${2:-}" ]] || fatal "缺少 XTCP 配置文件路径。"
-      tune_xtcp_config_file "${2:-}" "${3:-quic}" "true" "${4:-5000}" "true"
-      render_xtcp_config_summary "${2:-}"
+      [[ -n "${2:-}" ]] || fatal "缺少 XTCP 配置文件或目录路径。"
+      repair_xtcp_path "${2:-}" "${3:-quic}" "true" "${4:-5000}" "true"
+      render_xtcp_path_summary "${2:-}"
       ;;
     --service)
       need_root
@@ -3157,12 +3310,7 @@ run_cli() {
       action="${3:-status}"
       [[ -n "$service" ]] || fatal "缺少服务名。"
       case "$action" in
-        status) print_service_summary "$service" ;;
-        start) systemctl start "$service"; print_service_summary "$service" ;;
-        stop) systemctl stop "$service"; print_service_summary "$service" ;;
-        restart) systemctl restart "$service"; print_service_summary "$service" ;;
-        enable) systemctl enable "$service"; print_service_summary "$service" ;;
-        disable) systemctl disable "$service"; print_service_summary "$service" ;;
+        status|start|stop|restart|enable|disable) service_action "$service" "$action" ;;
         *) fatal "未知服务操作：$action" ;;
       esac
       ;;
