@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r5}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r6}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/refs/heads/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -1376,6 +1376,7 @@ render_xtcp_payload() {
   local server_addr="$1" server_port="$2" proxy_name="$3" visitor_name="$4" secret="$5"
   local bind_addr="$6" bind_port="$7" keep_tunnel_open="$8" fallback="$9"
   local fallback_proxy_name="${10}" fallback_visitor_name="${11}" fallback_timeout_ms="${12}"
+  local protocol="${13:-quic}" disable_assisted_addrs="${14:-false}"
   cat <<EOF_XTCP_PAYLOAD
 format = "install-frp-xtcp-v1"
 serverAddr = "$(toml_escape "$server_addr")"
@@ -1385,11 +1386,13 @@ visitorName = "$(toml_escape "$visitor_name")"
 secretKey = "$(toml_escape "$secret")"
 bindAddr = "$(toml_escape "$bind_addr")"
 bindPort = ${bind_port}
+protocol = "$(toml_escape "$protocol")"
 keepTunnelOpen = ${keep_tunnel_open}
 fallback = ${fallback}
 fallbackProxyName = "$(toml_escape "$fallback_proxy_name")"
 fallbackVisitorName = "$(toml_escape "$fallback_visitor_name")"
 fallbackTimeoutMs = ${fallback_timeout_ms}
+disableAssistedAddrs = ${disable_assisted_addrs}
 EOF_XTCP_PAYLOAD
 }
 
@@ -1428,7 +1431,7 @@ EOF_XTCP_STCP
 write_xtcp_visitor_config_from_payload() {
   local file="$1" payload="$2"
   local format server_name visitor_name secret bind_addr bind_port keep_tunnel_open
-  local fallback fallback_proxy_name fallback_visitor_name fallback_timeout_ms
+  local fallback fallback_proxy_name fallback_visitor_name fallback_timeout_ms protocol disable_assisted_addrs
   format="$(parse_xtcp_payload_value "$payload" format)"
   [[ "$format" == "install-frp-xtcp-v1" ]] || fatal "XTCP 导入码内容格式不正确。"
   server_name="$(parse_xtcp_payload_value "$payload" proxyName)"
@@ -1436,11 +1439,16 @@ write_xtcp_visitor_config_from_payload() {
   secret="$(parse_xtcp_payload_value "$payload" secretKey)"
   bind_addr="$(parse_xtcp_payload_value "$payload" bindAddr)"
   bind_port="$(parse_xtcp_payload_value "$payload" bindPort)"
+  protocol="$(parse_xtcp_payload_value "$payload" protocol)"
   keep_tunnel_open="$(parse_xtcp_payload_value "$payload" keepTunnelOpen)"
   fallback="$(parse_xtcp_payload_value "$payload" fallback)"
   fallback_proxy_name="$(parse_xtcp_payload_value "$payload" fallbackProxyName)"
   fallback_visitor_name="$(parse_xtcp_payload_value "$payload" fallbackVisitorName)"
   fallback_timeout_ms="$(parse_xtcp_payload_value "$payload" fallbackTimeoutMs)"
+  disable_assisted_addrs="$(parse_xtcp_payload_value "$payload" disableAssistedAddrs)"
+  [[ -n "$protocol" ]] || protocol="quic"
+  case "$protocol" in quic|kcp) ;; *) protocol="quic" ;; esac
+  [[ -n "$disable_assisted_addrs" ]] || disable_assisted_addrs="false"
 
   mkdir -p "${file%/*}"
   : > "$file"
@@ -1460,6 +1468,7 @@ EOF_XTCP_STCP_VISITOR
 [[visitors]]
 name = "$(toml_escape "$visitor_name")"
 type = "xtcp"
+protocol = "$(toml_escape "$protocol")"
 serverName = "$(toml_escape "$server_name")"
 secretKey = "$(toml_escape "$secret")"
 bindAddr = "$(toml_escape "$bind_addr")"
@@ -1472,6 +1481,14 @@ EOF_XTCP_VISITOR
 fallbackTo = "$(toml_escape "$fallback_visitor_name")"
 fallbackTimeoutMs = ${fallback_timeout_ms}
 EOF_XTCP_FALLBACK
+  fi
+
+  if [[ "$disable_assisted_addrs" == "true" ]]; then
+    cat >> "$file" <<EOF_XTCP_NAT
+
+[visitors.natTraversal]
+disableAssistedAddrs = true
+EOF_XTCP_NAT
   fi
 
   chown root:"$FRP_USER" "$file" 2>/dev/null || true
@@ -1503,7 +1520,7 @@ select_frpc_split_dir_for_write() {
 create_xtcp_exposed_and_code() {
   create_dirs_and_user
   local server_addr server_port name secret local_ip local_port bind_addr bind_port keep_open fallback
-  local fallback_proxy fallback_visitor timeout passphrase payload code safe_name file
+  local fallback_proxy fallback_visitor timeout protocol disable_assisted passphrase payload code safe_name file
   select_frpc_split_dir_for_write || return 0
   server_addr="$(ask_required "导入端连接的 frps 地址/IP/域名" "")"
   server_port="$(ask_port "导入端连接的 frps 端口" "7000")"
@@ -1514,12 +1531,15 @@ create_xtcp_exposed_and_code() {
   local_port="$(ask_port "被访问本地服务端口 localPort" "22")"
   bind_addr="$(ask "访问端本地监听地址 bindAddr" "127.0.0.1")"
   bind_port="$(ask_port "访问端本地监听端口 bindPort" "6000")"
+  protocol="$(ask "访问端 XTCP 底层协议 quic/kcp；QUIC 超时可试 kcp" "kcp")"
+  case "$protocol" in quic|kcp) ;; *) warn "未知协议，回退 kcp"; protocol="kcp" ;; esac
+  disable_assisted="$(ask_yes_no_value "禁用辅助地址；有 Docker/VPN/100.64 地址干扰时建议启用" "Y")"
   keep_open="$(ask_yes_no_value "访问端是否 keepTunnelOpen" "n")"
   fallback="$(ask_yes_no_value "是否生成 STCP fallback" "Y")"
   fallback_proxy="${name}_stcp"
   fallback_visitor="${name}_stcp_fallback"
-  timeout="$(ask "fallbackTimeoutMs" "200")"
-  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=200
+  timeout="$(ask "fallbackTimeoutMs；打洞常需 1-5 秒，太短会一直 fallback" "5000")"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=5000
 
   safe_name="$(safe_filename "$name")"
   file="${SELECTED_FRPC_SPLIT_DIR}/${safe_name}.toml"
@@ -1533,7 +1553,7 @@ create_xtcp_exposed_and_code() {
   write_xtcp_exposed_config "$file" "$name" "$secret" "$local_ip" "$local_port" "$fallback" "$fallback_proxy"
   verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"
 
-  payload="$(render_xtcp_payload "$server_addr" "$server_port" "$name" "${name}_visitor" "$secret" "$bind_addr" "$bind_port" "$keep_open" "$fallback" "$fallback_proxy" "$fallback_visitor" "$timeout")"
+  payload="$(render_xtcp_payload "$server_addr" "$server_port" "$name" "${name}_visitor" "$secret" "$bind_addr" "$bind_port" "$keep_open" "$fallback" "$fallback_proxy" "$fallback_visitor" "$timeout" "$protocol" "$disable_assisted")"
   passphrase="$(ask "导入码加密口令，留空随机生成" "")"
   [[ -z "$passphrase" ]] && passphrase="$(random_secret | cut -c1-20)"
   code="$(encrypt_payload_code "IFRP-XTCP-V1" "$passphrase" "$payload")"

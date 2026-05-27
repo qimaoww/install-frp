@@ -182,7 +182,9 @@ test_xtcp_import_code_helpers() {
     "true" \
     "p2p_ssh_stcp" \
     "p2p_ssh_stcp_fallback" \
-    "200")"
+    "5000" \
+    "kcp" \
+    "true")"
 
   assert_eq "install-frp-xtcp-v1" "$(parse_xtcp_payload_value "$payload" format)" "xtcp payload format"
   assert_eq "p2p_ssh" "$(parse_xtcp_payload_value "$payload" proxyName)" "xtcp proxy name parsed"
@@ -200,7 +202,11 @@ test_xtcp_import_code_helpers() {
   visitor_file="${TMP_DIR}/xtcp-visitor.toml"
   write_xtcp_visitor_config_from_payload "$visitor_file" "$payload"
   assert_contains 'type = "xtcp"' "$visitor_file" "xtcp visitor rendered"
+  assert_contains 'protocol = "kcp"' "$visitor_file" "xtcp protocol rendered"
   assert_contains 'fallbackTo = "p2p_ssh_stcp_fallback"' "$visitor_file" "xtcp fallback rendered"
+  assert_contains 'fallbackTimeoutMs = 5000' "$visitor_file" "xtcp fallback timeout rendered"
+  assert_contains '[visitors.natTraversal]' "$visitor_file" "xtcp nat traversal section rendered"
+  assert_contains 'disableAssistedAddrs = true' "$visitor_file" "xtcp assisted addresses disabled"
   assert_contains 'bindPort = -1' "$visitor_file" "stcp fallback bind port rendered"
 }
 

@@ -48,7 +48,7 @@ sudo bash frp.sh
 菜单顶部只显示运行概况；版本和配置细节在子菜单和安装摘要里查看：
 
 ```text
-frp 管理脚本 2026.05.27-r5
+frp 管理脚本 2026.05.27-r6
 状态：服务端:未运行 | 客户端:运行中 | 实例:2
 ```
 
@@ -214,12 +214,23 @@ bash <(curl -fsSL 'https://raw.githubusercontent.com/qimaoww/install-frp/refs/he
 
 创建被访问端 XTCP 配置后，脚本会提示重启对应 `frpc`，让 `[[proxies]]` 注册到 `frps`。如果跳过这一步，访问端会看到类似 `xtcp server for [name] doesn't exist` 的错误。
 
+脚本会把访问端 XTCP 底层协议写入导入码。默认使用 `kcp`；如果你想沿用 frp 默认行为，也可以选择 `quic`。当日志里出现 Docker、VPN、`100.64.0.0/10` 之类辅助地址干扰时，建议启用“禁用辅助地址”，脚本会写入：
+
+```toml
+protocol = "kcp"
+
+[visitors.natTraversal]
+disableAssistedAddrs = true
+```
+
 如果启用 STCP fallback，脚本会在被访问端生成 `xtcp + stcp` 两个 proxy，在访问端生成 `stcp visitor + xtcp visitor`，并自动写入：
 
 ```toml
 fallbackTo = "<stcp-visitor-name>"
-fallbackTimeoutMs = 200
+fallbackTimeoutMs = 5000
 ```
+
+`fallbackTimeoutMs` 默认 5000ms。打洞通常需要 1 到 5 秒，设置太短会出现“打洞其实快成功了，但用户连接已经 fallback 或超时”的现象。
 
 ---
 
