@@ -295,12 +295,7 @@ write_token_file() {
 
 print_banner() {
   clear 2>/dev/null || true
-  cat <<BANNER
-${C_BOLD}==================================================
-       frp 一键安装/管理脚本  ${SCRIPT_VERSION}
-       支持 TOML / systemd / frps / frpc
-==================================================${C_RESET}
-BANNER
+  printf '%sfrp 管理脚本 %s%s\n' "$C_BOLD" "$SCRIPT_VERSION" "$C_RESET"
   render_status_bar
   echo
 }
@@ -610,24 +605,36 @@ service_status_label() {
   local service="$1" active="" enabled=""
   has_cmd systemctl || { printf '服务状态未知'; return 0; }
   if ! systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
-    printf '服务未安装'
+    printf '未装服务'
     return 0
   fi
   active="$(systemctl is-active "$service" 2>/dev/null || true)"
   enabled="$(systemctl is-enabled "$service" 2>/dev/null || true)"
   [[ -n "$active" ]] || active="unknown"
   [[ -n "$enabled" ]] || enabled="unknown"
-  printf '服务%s/%s' "$active" "$enabled"
+  case "$active" in
+    active) active="运行" ;;
+    inactive) active="停止" ;;
+    failed) active="失败" ;;
+    *) active="未知" ;;
+  esac
+  case "$enabled" in
+    enabled) enabled="自启" ;;
+    disabled) enabled="未自启" ;;
+    static) enabled="静态" ;;
+    *) enabled="未知" ;;
+  esac
+  printf '%s/%s' "$active" "$enabled"
 }
 
 config_status_label() {
   local conf="$1"
   if [[ -s "$conf" ]]; then
-    printf '配置已存在'
+    printf '已配置'
   elif [[ -f "$conf" ]]; then
-    printf '配置空文件'
+    printf '空配置'
   else
-    printf '配置未生成'
+    printf '未配置'
   fi
 }
 
@@ -637,16 +644,16 @@ render_component_status() {
   [[ -n "$version" ]] || version="未安装"
   config_state="$(config_status_label "$conf")"
   service_state="$(service_status_label "$service")"
-  printf '%s: %s | %s | %s' "$name" "$version" "$config_state" "$service_state"
+  printf '%s: %s/%s/%s' "$name" "$version" "$config_state" "$service_state"
 }
 
 render_status_bar() {
   local instance_count
   instance_count="$(list_frpc_instances 2>/dev/null | wc -l | tr -d '[:space:]')"
-  cat <<EOF_STATUS
-状态：$(render_component_status "frps" "${INSTALL_DIR}/frps" "$FRPS_CONFIG" "frps")
-      $(render_component_status "frpc" "${INSTALL_DIR}/frpc" "$FRPC_CONFIG" "frpc") | 命名实例 ${instance_count}
-EOF_STATUS
+  printf '状态：%s | %s | 实例:%s\n' \
+    "$(render_component_status "frps" "${INSTALL_DIR}/frps" "$FRPS_CONFIG" "frps")" \
+    "$(render_component_status "frpc" "${INSTALL_DIR}/frpc" "$FRPC_CONFIG" "frpc")" \
+    "$instance_count"
 }
 
 validate_instance_name() {
@@ -2228,6 +2235,32 @@ MENU_FRPC
   done
 }
 
+tools_menu() {
+  while true; do
+    echo
+    info "工具/维护"
+    cat <<'MENU_TOOLS'
+1) 仅安装/更新 frp 二进制文件
+2) 校验全部配置
+3) 查看安装摘要
+4) 配置 GitHub 下载代理
+5) 卸载 frp
+0) 返回
+MENU_TOOLS
+    local choice
+    choice="$(ask "请选择" "1")"
+    case "$choice" in
+      1) install_or_update_binaries; pause ;;
+      2) verify_all_configs; pause ;;
+      3) show_summary; pause ;;
+      4) configure_github_proxy; pause ;;
+      5) uninstall_frp; pause ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择"; pause ;;
+    esac
+  done
+}
+
 manage_single_service_menu() {
   local svc="$1" action
   echo "操作：1) status  2) start  3) stop  4) restart  5) logs -f  6) enable  7) disable"
@@ -2740,37 +2773,31 @@ uninstall_frp() {
   ok "卸载完成。"
 }
 
+render_main_menu() {
+  cat <<'MENU_MAIN'
+1) frps 服务端
+2) frpc 客户端
+3) 配置管理
+4) 日志查看
+5) 工具/维护
+0) 退出
+MENU_MAIN
+}
+
 main_menu() {
   need_root
   load_installer_config
   while true; do
     print_banner
-    cat <<MENU
-1) frps 服务端管理
-2) frpc 客户端管理
-3) 仅安装/更新 frp 二进制文件
-4) 配置管理（编辑/校验/重启）
-5) 校验全部配置
-6) 查看当前配置
-7) 查看日志
-8) 查看安装摘要
-9) 配置 GitHub 下载代理
-10) 卸载 frp
-0) 退出
-MENU
+    render_main_menu
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
       1) frps_management_menu ;;
       2) frpc_management_menu ;;
-      3) install_or_update_binaries; pause ;;
-      4) config_management_menu ;;
-      5) verify_all_configs; pause ;;
-      6) show_current_configs; pause ;;
-      7) show_logs_menu; pause ;;
-      8) show_summary; pause ;;
-      9) configure_github_proxy; pause ;;
-      10) uninstall_frp; pause ;;
+      3) config_management_menu ;;
+      4) show_logs_menu; pause ;;
+      5) tools_menu ;;
       0|q|Q) exit 0 ;;
       *) warn "无效选择"; pause ;;
     esac

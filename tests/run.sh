@@ -247,6 +247,7 @@ test_install_state_and_status_bar() {
   require_function render_component_status
   require_function render_status_bar
   require_function resolve_default_version
+  require_function render_main_menu
 
   assert_eq "v0.68.1" "$(normalize_version_tag "0.68.1")" "plain version normalized"
   assert_eq "v0.69.0" "$(normalize_version_tag "frp 0.69.0")" "version text normalized"
@@ -282,12 +283,19 @@ EOF_FAKE_FRPC_RESTORE
   local frps_status status_bar
   frps_status="$(render_component_status "frps" "${INSTALL_DIR}/frps" "$FRPS_CONFIG" "frps")"
   [[ "$frps_status" == *"frps: v0.68.1"* ]] || fail "frps status missing version: ${frps_status}"
-  [[ "$frps_status" == *"配置已存在"* ]] || fail "frps status missing config state: ${frps_status}"
+  [[ "$frps_status" == *"已配置"* ]] || fail "frps status missing config state: ${frps_status}"
 
   status_bar="$(render_status_bar)"
   [[ "$status_bar" == *"状态："* ]] || fail "status bar missing title"
   [[ "$status_bar" == *"frps: v0.68.1"* ]] || fail "status bar missing frps version"
   [[ "$status_bar" == *"frpc: v0.68.1"* ]] || fail "status bar missing frpc version"
+  [[ "$(printf '%s\n' "$status_bar" | wc -l | tr -d '[:space:]')" == "1" ]] || fail "status bar should be one line"
+
+  local menu
+  menu="$(render_main_menu)"
+  assert_contains '1) frps 服务端' <(printf '%s\n' "$menu") "compact menu has frps entry"
+  assert_contains '5) 工具/维护' <(printf '%s\n' "$menu") "compact menu has tools entry"
+  ! printf '%s\n' "$menu" | grep -Fq '10)' || fail "main menu should not expose ten top-level entries"
 }
 
 main() {
