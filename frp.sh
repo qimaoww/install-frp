@@ -5,22 +5,23 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2026.04.26-r8"
-FRP_REPO="fatedier/frp"
-INSTALL_DIR="/usr/local/bin"
-CONFIG_DIR="/etc/frp"
-FRPC_CONF_DIR="/etc/frp/frpc.d"
-PRESET_DIR="/etc/frp/presets.d"
-LOG_DIR="/var/log/frp"
-TOKEN_FILE="/etc/frp/token"
-FRPS_CONFIG="/etc/frp/frps.toml"
-FRPC_CONFIG="/etc/frp/frpc.toml"
-FRPC_STORE="/etc/frp/frpc-store.json"
-INSTALLER_CONFIG="/etc/frp/installer.env"
-INSTALLER_LOG="/var/log/frp/installer.log"
-FRP_USER="frp"
-GH_API="https://api.github.com/repos/${FRP_REPO}/releases/latest"
-GH_RELEASE_BASE="https://github.com/${FRP_REPO}/releases/download"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r1}"
+FRP_REPO="${FRP_REPO:-fatedier/frp}"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+CONFIG_DIR="${CONFIG_DIR:-/etc/frp}"
+FRPC_CONF_DIR="${FRPC_CONF_DIR:-${CONFIG_DIR}/frpc.d}"
+FRPC_CLIENTS_DIR="${FRPC_CLIENTS_DIR:-${CONFIG_DIR}/clients}"
+PRESET_DIR="${PRESET_DIR:-${CONFIG_DIR}/presets.d}"
+LOG_DIR="${LOG_DIR:-/var/log/frp}"
+TOKEN_FILE="${TOKEN_FILE:-${CONFIG_DIR}/token}"
+FRPS_CONFIG="${FRPS_CONFIG:-${CONFIG_DIR}/frps.toml}"
+FRPC_CONFIG="${FRPC_CONFIG:-${CONFIG_DIR}/frpc.toml}"
+FRPC_STORE="${FRPC_STORE:-${CONFIG_DIR}/frpc-store.json}"
+INSTALLER_CONFIG="${INSTALLER_CONFIG:-${CONFIG_DIR}/installer.env}"
+INSTALLER_LOG="${INSTALLER_LOG:-${LOG_DIR}/installer.log}"
+FRP_USER="${FRP_USER:-frp}"
+GH_API="${GH_API:-https://api.github.com/repos/${FRP_REPO}/releases/latest}"
+GH_RELEASE_BASE="${GH_RELEASE_BASE:-https://github.com/${FRP_REPO}/releases/download}"
 GH_PROXY="${GH_PROXY:-}"
 
 # ---------- colors ----------
@@ -211,6 +212,87 @@ random_secret() {
   fi
 }
 
+encrypt_payload_code() {
+  local prefix="$1" passphrase="$2" payload="$3" cipher
+  has_cmd openssl || fatal "需要 openssl 才能生成加密导入码。"
+  [[ -n "$passphrase" ]] || fatal "加密口令不能为空。"
+  cipher="$(printf '%s' "$payload" | openssl enc -aes-256-cbc -pbkdf2 -salt -base64 -A -pass "pass:${passphrase}")"
+  printf '%s:%s' "$prefix" "$cipher"
+}
+
+decrypt_payload_code() {
+  local prefix="$1" passphrase="$2" code="$3" cipher
+  has_cmd openssl || fatal "需要 openssl 才能解密导入码。"
+  [[ -n "$passphrase" ]] || fatal "解密口令不能为空。"
+  case "$code" in
+    "${prefix}:"*) cipher="${code#${prefix}:}" ;;
+    *) fatal "导入码前缀不正确，期望 ${prefix}:..." ;;
+  esac
+  printf '%s' "$cipher" | openssl enc -aes-256-cbc -pbkdf2 -d -base64 -A -pass "pass:${passphrase}"
+}
+
+parse_payload_value() {
+  local payload="$1" key="$2"
+  awk -v want="$key" '
+    function trim(s) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      return s
+    }
+    {
+      line=$0
+      pos=index(line, "=")
+      if (pos == 0) next
+      k=trim(substr(line, 1, pos-1))
+      v=trim(substr(line, pos+1))
+      if (k == want) {
+        if (v ~ /^".*"$/) {
+          sub(/^"/, "", v)
+          sub(/"$/, "", v)
+          gsub(/\\"/, "\"", v)
+          gsub(/\\\\/, "\\", v)
+        }
+        print v
+        exit
+      }
+    }
+  ' <<< "$payload"
+}
+
+read_toml_value() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 0
+  awk -v want="$key" '
+    function trim(s) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      return s
+    }
+    {
+      line=$0
+      pos=index(line, "=")
+      if (pos == 0) next
+      k=trim(substr(line, 1, pos-1))
+      v=trim(substr(line, pos+1))
+      if (k == want) {
+        if (v ~ /^".*"$/) {
+          sub(/^"/, "", v)
+          sub(/"$/, "", v)
+        }
+        print v
+        exit
+      }
+    }
+  ' "$file"
+}
+
+write_token_file() {
+  local file="$1" token="$2" dir
+  dir="${file%/*}"
+  mkdir -p "$dir"
+  printf '%s\n' "$token" > "$file"
+  chown root:"$FRP_USER" "$file" 2>/dev/null || chown root:root "$file" 2>/dev/null || true
+  chmod 640 "$file" 2>/dev/null || true
+}
+
 print_banner() {
   clear 2>/dev/null || true
   cat <<BANNER
@@ -293,7 +375,7 @@ select_version() {
 }
 
 create_dirs_and_user() {
-  mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$PRESET_DIR" "$LOG_DIR"
+  mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"
 
   if ! id "$FRP_USER" >/dev/null 2>&1; then
     if has_cmd useradd; then
@@ -307,7 +389,7 @@ create_dirs_and_user() {
   if id "$FRP_USER" >/dev/null 2>&1; then
     chown -R root:"$FRP_USER" "$CONFIG_DIR"
     chown -R "$FRP_USER":"$FRP_USER" "$LOG_DIR"
-    chmod 750 "$CONFIG_DIR" "$FRPC_CONF_DIR" "$PRESET_DIR"
+    chmod 750 "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR"
   else
     warn "无法创建系统用户 $FRP_USER，将使用 root 运行 systemd 服务。"
   fi
@@ -353,9 +435,7 @@ ensure_token_file() {
       token="$(random_secret)"
     fi
   fi
-  printf '%s\n' "$token" > "$TOKEN_FILE"
-  chown root:"$FRP_USER" "$TOKEN_FILE" 2>/dev/null || chown root:root "$TOKEN_FILE"
-  chmod 640 "$TOKEN_FILE"
+  write_token_file "$TOKEN_FILE" "$token"
 }
 
 write_systemd_service() {
@@ -439,6 +519,294 @@ frp_version_text() {
   [[ -n "$out" ]] || out="$("$bin" -v 2>/dev/null || true)"
   [[ -n "$out" ]] || out="$("$bin" --version 2>/dev/null || true)"
   printf '%s' "$out"
+}
+
+validate_instance_name() {
+  local name="${1:-}"
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || return 1
+  [[ "$name" != "." && "$name" != ".." ]]
+}
+
+instance_dir() {
+  local name="$1"
+  validate_instance_name "$name" || return 1
+  printf '%s/%s' "$FRPC_CLIENTS_DIR" "$name"
+}
+
+instance_frpc_config() {
+  printf '%s/frpc.toml' "$(instance_dir "$1")"
+}
+
+instance_frpc_conf_dir() {
+  printf '%s/frpc.d' "$(instance_dir "$1")"
+}
+
+instance_token_file() {
+  printf '%s/token' "$(instance_dir "$1")"
+}
+
+instance_log_file() {
+  local name="$1"
+  validate_instance_name "$name" || return 1
+  printf '%s/frpc-%s.log' "$LOG_DIR" "$name"
+}
+
+instance_service_name() {
+  local name="$1"
+  validate_instance_name "$name" || return 1
+  printf 'frpc@%s' "$name"
+}
+
+write_frpc_base_config() {
+  local config="$1" split_dir="$2" token_file="$3" log_file="$4"
+  local server_addr="$5" server_port="$6" user_name="$7" proto="$8"
+  local tls_enable="$9" pool_count="${10}" dns_server="${11}"
+  local admin_addr="${12}" admin_port="${13}" admin_user="${14}" admin_pass="${15}"
+  local store_path="${16}" enable_store="${17}" config_dir
+
+  config_dir="${config%/*}"
+  mkdir -p "$config_dir" "$split_dir" "${log_file%/*}"
+
+  cat > "$config" <<EOF_FRPC_BASE
+# Generated by frp manager ${SCRIPT_VERSION}
+serverAddr = "$(toml_escape "$server_addr")"
+serverPort = ${server_port}
+loginFailExit = true
+includes = ["$(toml_escape "$split_dir")/*.toml"]
+
+# Token authentication. The token is stored outside this config file.
+auth.method = "token"
+auth.tokenSource.type = "file"
+auth.tokenSource.file.path = "$(toml_escape "$token_file")"
+
+# Transport.
+transport.protocol = "$(toml_escape "$proto")"
+transport.tls.enable = ${tls_enable}
+transport.poolCount = ${pool_count}
+
+# Logs.
+log.to = "$(toml_escape "$log_file")"
+log.level = "info"
+log.maxDays = 7
+log.disablePrintColor = true
+EOF_FRPC_BASE
+
+  [[ -n "$user_name" ]] && echo "user = \"$(toml_escape "$user_name")\"" >> "$config"
+  [[ -n "$dns_server" ]] && echo "dnsServer = \"$(toml_escape "$dns_server")\"" >> "$config"
+
+  if [[ -n "$admin_addr" && -n "$admin_port" ]]; then
+    cat >> "$config" <<EOF_FRPC_ADMIN
+
+# Admin UI / runtime proxy management.
+webServer.addr = "$(toml_escape "$admin_addr")"
+webServer.port = ${admin_port}
+webServer.user = "$(toml_escape "$admin_user")"
+webServer.password = "$(toml_escape "$admin_pass")"
+EOF_FRPC_ADMIN
+    if [[ "$enable_store" == "true" ]]; then
+      cat >> "$config" <<EOF_FRPC_STORE
+
+[store]
+path = "$(toml_escape "$store_path")"
+EOF_FRPC_STORE
+    fi
+  fi
+
+  chown root:"$FRP_USER" "$config" 2>/dev/null || true
+  chmod 640 "$config" 2>/dev/null || true
+}
+
+render_frpc_pairing_payload() {
+  local server_addr="$1" server_port="$2" token="$3" proto="$4"
+  local tls_enable="$5" pool_count="$6" dns_server="$7" user_name="$8"
+  cat <<EOF_FRPC_PAIRING
+format = "install-frp-frpc-v1"
+serverAddr = "$(toml_escape "$server_addr")"
+serverPort = ${server_port}
+token = "$(toml_escape "$token")"
+transportProtocol = "$(toml_escape "$proto")"
+tlsEnable = ${tls_enable}
+poolCount = ${pool_count}
+dnsServer = "$(toml_escape "$dns_server")"
+userName = "$(toml_escape "$user_name")"
+EOF_FRPC_PAIRING
+}
+
+write_frpc_config_from_pairing_payload() {
+  local config="$1" split_dir="$2" token_file="$3" log_file="$4" store_file="$5" payload="$6"
+  local format server_addr server_port token proto tls_enable pool_count dns_server user_name
+  format="$(parse_payload_value "$payload" format)"
+  [[ "$format" == "install-frp-frpc-v1" ]] || fatal "frps 配对码内容格式不正确。"
+  server_addr="$(parse_payload_value "$payload" serverAddr)"
+  server_port="$(parse_payload_value "$payload" serverPort)"
+  token="$(parse_payload_value "$payload" token)"
+  proto="$(parse_payload_value "$payload" transportProtocol)"
+  tls_enable="$(parse_payload_value "$payload" tlsEnable)"
+  pool_count="$(parse_payload_value "$payload" poolCount)"
+  dns_server="$(parse_payload_value "$payload" dnsServer)"
+  user_name="$(parse_payload_value "$payload" userName)"
+  [[ -n "$server_addr" && -n "$server_port" && -n "$token" ]] || fatal "frps 配对码缺少 serverAddr/serverPort/token。"
+  [[ -n "$proto" ]] || proto="tcp"
+  [[ -n "$tls_enable" ]] || tls_enable="true"
+  [[ -n "$pool_count" ]] || pool_count="0"
+
+  write_token_file "$token_file" "$token"
+  write_frpc_base_config \
+    "$config" \
+    "$split_dir" \
+    "$token_file" \
+    "$log_file" \
+    "$server_addr" \
+    "$server_port" \
+    "$user_name" \
+    "$proto" \
+    "$tls_enable" \
+    "$pool_count" \
+    "$dns_server" \
+    "" \
+    "" \
+    "" \
+    "" \
+    "$store_file" \
+    "false"
+}
+
+list_frpc_instances() {
+  local file
+  [[ -d "$FRPC_CLIENTS_DIR" ]] || return 0
+  while IFS= read -r -d '' file; do
+    basename "$(dirname "$file")"
+  done < <(find "$FRPC_CLIENTS_DIR" -mindepth 2 -maxdepth 2 -type f -name frpc.toml -print0 2>/dev/null | sort -z)
+}
+
+render_frpc_template_service() {
+  local user_line="" group_line="" cap_line
+  if id "$FRP_USER" >/dev/null 2>&1; then
+    user_line="User=${FRP_USER}"
+    group_line="Group=${FRP_USER}"
+  fi
+  cap_line=$'AmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE'
+
+  cat <<EOF_SERVICE
+[Unit]
+Description=frp client instance %i service
+Documentation=https://gofrp.org/zh-cn/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+${user_line}
+${group_line}
+ExecStart=${INSTALL_DIR}/frpc -c ${FRPC_CLIENTS_DIR}/%i/frpc.toml
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+${cap_line}
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=${FRPC_CLIENTS_DIR}/%i ${LOG_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF_SERVICE
+}
+
+write_frpc_template_service() {
+  render_frpc_template_service > /etc/systemd/system/frpc@.service
+  systemctl daemon-reload
+  ok "已写入 /etc/systemd/system/frpc@.service"
+}
+
+configure_named_frpc_instance() {
+  create_dirs_and_user
+  local name dir config split_dir token_file log_file store_file
+  local server_addr server_port token user_name proto tls_enable pool_count dns_server
+  local enable_admin admin_addr admin_port admin_user admin_pass enable_store service
+
+  echo
+  info "配置命名 frpc 客户端实例"
+  while true; do
+    name="$(ask_required "实例名，只能使用字母数字点号下划线短横线，例如 home" "")"
+    if validate_instance_name "$name"; then
+      break
+    fi
+    warn "实例名不合法，请使用 1-63 位字母、数字、点号、下划线或短横线，且以字母或数字开头。"
+  done
+
+  dir="$(instance_dir "$name")"
+  config="$(instance_frpc_config "$name")"
+  split_dir="$(instance_frpc_conf_dir "$name")"
+  token_file="$(instance_token_file "$name")"
+  log_file="$(instance_log_file "$name")"
+  store_file="${dir}/frpc-store.json"
+  mkdir -p "$dir" "$split_dir"
+
+  server_addr="$(ask_required "frps 服务器地址 serverAddr/IP/域名" "")"
+  server_port="$(ask_port "frps 服务器端口 serverPort" "7000")"
+  token="$(ask "鉴权 token，留空自动生成/沿用 ${token_file}" "")"
+  if [[ -z "$token" && -s "$token_file" ]]; then
+    token="$(tr -d '[:space:]' < "$token_file")"
+  fi
+  [[ -z "$token" ]] && token="$(random_secret)"
+  write_token_file "$token_file" "$token"
+  user_name="$(ask "客户端 user，留空不设置；多人共用服务端建议填写" "")"
+
+  echo "通信协议可选：tcp / kcp / quic / websocket / wss"
+  proto="$(ask "transport.protocol" "tcp")"
+  case "$proto" in tcp|kcp|quic|websocket|wss) ;; *) warn "未知协议，回退 tcp"; proto="tcp" ;; esac
+  tls_enable="$(ask_yes_no_value "是否启用 frpc->frps TLS；新版默认启用，建议保留" "Y")"
+  pool_count="$(ask "连接池数量 transport.poolCount，普通场景 0，短连接高并发可 1-5" "0")"
+  [[ "$pool_count" =~ ^[0-9]+$ ]] || pool_count=0
+  dns_server="$(ask "自定义 DNS 服务器，留空使用系统 DNS，例如 1.1.1.1" "")"
+
+  enable_admin="$(ask_yes_no_value "是否启用该实例的 Admin UI / 动态代理管理" "n")"
+  if [[ "$enable_admin" == "true" ]]; then
+    admin_addr="$(ask "Admin UI 监听地址，建议 127.0.0.1" "127.0.0.1")"
+    admin_port="$(ask_port "Admin UI 端口" "7400")"
+    admin_user="$(ask "Admin UI 用户名" "admin")"
+    admin_pass="$(ask "Admin UI 密码，留空随机生成" "")"
+    [[ -z "$admin_pass" ]] && admin_pass="$(random_secret | cut -c1-16)"
+    enable_store="$(ask_yes_no_value "是否启用 Store 动态代理持久化" "Y")"
+  else
+    admin_addr=""; admin_port=""; admin_user=""; admin_pass=""; enable_store="false"
+  fi
+
+  if [[ -f "$config" ]]; then
+    cp -a "$config" "${config}.bak.$(date +%Y%m%d-%H%M%S)"
+  fi
+
+  write_frpc_base_config \
+    "$config" \
+    "$split_dir" \
+    "$token_file" \
+    "$log_file" \
+    "$server_addr" \
+    "$server_port" \
+    "$user_name" \
+    "$proto" \
+    "$tls_enable" \
+    "$pool_count" \
+    "$dns_server" \
+    "$admin_addr" \
+    "$admin_port" \
+    "$admin_user" \
+    "$admin_pass" \
+    "$store_file" \
+    "$enable_store"
+
+  verify_config "${INSTALL_DIR}/frpc" "$config"
+  write_frpc_template_service
+  service="$(instance_service_name "$name")"
+  if confirm "是否现在启动/重启 ${service}" "Y"; then
+    systemctl_enable_restart "$service"
+  fi
+
+  echo
+  ok "frpc 实例 ${name} 配置完成：$config"
+  echo "代理拆分配置目录：$split_dir"
 }
 
 # ---------- frps ----------
@@ -581,7 +949,7 @@ install_frps_flow() {
 # ---------- frpc ----------
 configure_frpc() {
   create_dirs_and_user
-  local server_addr server_port token token_value user_name proto tls_enable pool_count dns_server
+  local server_addr server_port token user_name proto tls_enable pool_count dns_server
   local enable_admin admin_addr admin_port admin_user admin_pass enable_store
 
   echo
@@ -590,7 +958,6 @@ configure_frpc() {
   server_port="$(ask_port "frps 服务器端口 serverPort" "7000")"
   token="$(ask "鉴权 token，留空自动生成/沿用 ${TOKEN_FILE}" "")"
   ensure_token_file "$token"
-  token_value="$(tr -d '[:space:]' < "$TOKEN_FILE")"
   user_name="$(ask "客户端 user，留空不设置；多人共用服务端建议填写" "")"
 
   echo "通信协议可选：tcp / kcp / quic / websocket / wss"
@@ -617,49 +984,24 @@ configure_frpc() {
     cp -a "$FRPC_CONFIG" "${FRPC_CONFIG}.bak.$(date +%Y%m%d-%H%M%S)"
   fi
 
-  cat > "$FRPC_CONFIG" <<EOF_FRPC
-# Generated by frp manager ${SCRIPT_VERSION}
-serverAddr = "$(toml_escape "$server_addr")"
-serverPort = ${server_port}
-loginFailExit = true
-includes = ["${FRPC_CONF_DIR}/*.toml"]
-
-# Token authentication.
-auth.method = "token"
-auth.token = "$(toml_escape "$token_value")"
-
-# Transport.
-transport.protocol = "${proto}"
-transport.tls.enable = ${tls_enable}
-transport.poolCount = ${pool_count}
-
-# Logs.
-log.to = "${LOG_DIR}/frpc.log"
-log.level = "info"
-log.maxDays = 7
-log.disablePrintColor = true
-EOF_FRPC
-
-  [[ -n "$user_name" ]] && echo "user = \"$(toml_escape "$user_name")\"" >> "$FRPC_CONFIG"
-  [[ -n "$dns_server" ]] && echo "dnsServer = \"$(toml_escape "$dns_server")\"" >> "$FRPC_CONFIG"
-
-  if [[ "$enable_admin" == "true" ]]; then
-    cat >> "$FRPC_CONFIG" <<EOF_FRPC_ADMIN
-
-# Admin UI / runtime proxy management.
-webServer.addr = "$(toml_escape "$admin_addr")"
-webServer.port = ${admin_port}
-webServer.user = "$(toml_escape "$admin_user")"
-webServer.password = "$(toml_escape "$admin_pass")"
-EOF_FRPC_ADMIN
-    if [[ "$enable_store" == "true" ]]; then
-      cat >> "$FRPC_CONFIG" <<EOF_FRPC_STORE
-
-[store]
-path = "${FRPC_STORE}"
-EOF_FRPC_STORE
-    fi
-  fi
+  write_frpc_base_config \
+    "$FRPC_CONFIG" \
+    "$FRPC_CONF_DIR" \
+    "$TOKEN_FILE" \
+    "${LOG_DIR}/frpc.log" \
+    "$server_addr" \
+    "$server_port" \
+    "$user_name" \
+    "$proto" \
+    "$tls_enable" \
+    "$pool_count" \
+    "$dns_server" \
+    "$admin_addr" \
+    "$admin_port" \
+    "$admin_user" \
+    "$admin_pass" \
+    "$FRPC_STORE" \
+    "$enable_store"
 
   chown root:"$FRP_USER" "$FRPC_CONFIG" 2>/dev/null || true
   chmod 640 "$FRPC_CONFIG"
@@ -807,6 +1149,231 @@ secretKey = "$(toml_escape "$secret")"
 bindAddr = "$(toml_escape "$bind_addr")"
 bindPort = ${bind_port}
 EOF_VISITOR
+}
+
+render_xtcp_payload() {
+  local server_addr="$1" server_port="$2" proxy_name="$3" visitor_name="$4" secret="$5"
+  local bind_addr="$6" bind_port="$7" keep_tunnel_open="$8" fallback="$9"
+  local fallback_proxy_name="${10}" fallback_visitor_name="${11}" fallback_timeout_ms="${12}"
+  cat <<EOF_XTCP_PAYLOAD
+format = "install-frp-xtcp-v1"
+serverAddr = "$(toml_escape "$server_addr")"
+serverPort = ${server_port}
+proxyName = "$(toml_escape "$proxy_name")"
+visitorName = "$(toml_escape "$visitor_name")"
+secretKey = "$(toml_escape "$secret")"
+bindAddr = "$(toml_escape "$bind_addr")"
+bindPort = ${bind_port}
+keepTunnelOpen = ${keep_tunnel_open}
+fallback = ${fallback}
+fallbackProxyName = "$(toml_escape "$fallback_proxy_name")"
+fallbackVisitorName = "$(toml_escape "$fallback_visitor_name")"
+fallbackTimeoutMs = ${fallback_timeout_ms}
+EOF_XTCP_PAYLOAD
+}
+
+parse_xtcp_payload_value() {
+  parse_payload_value "$1" "$2"
+}
+
+write_xtcp_exposed_config() {
+  local file="$1" proxy_name="$2" secret="$3" local_ip="$4" local_port="$5"
+  local fallback="${6:-false}" fallback_proxy_name="${7:-}"
+  mkdir -p "${file%/*}"
+  cat > "$file" <<EOF_XTCP_EXPOSED
+[[proxies]]
+name = "$(toml_escape "$proxy_name")"
+type = "xtcp"
+secretKey = "$(toml_escape "$secret")"
+localIP = "$(toml_escape "$local_ip")"
+localPort = ${local_port}
+EOF_XTCP_EXPOSED
+
+  if [[ "$fallback" == "true" ]]; then
+    cat >> "$file" <<EOF_XTCP_STCP
+
+[[proxies]]
+name = "$(toml_escape "$fallback_proxy_name")"
+type = "stcp"
+secretKey = "$(toml_escape "$secret")"
+localIP = "$(toml_escape "$local_ip")"
+localPort = ${local_port}
+EOF_XTCP_STCP
+  fi
+  chown root:"$FRP_USER" "$file" 2>/dev/null || true
+  chmod 640 "$file" 2>/dev/null || true
+}
+
+write_xtcp_visitor_config_from_payload() {
+  local file="$1" payload="$2"
+  local format server_name visitor_name secret bind_addr bind_port keep_tunnel_open
+  local fallback fallback_proxy_name fallback_visitor_name fallback_timeout_ms
+  format="$(parse_xtcp_payload_value "$payload" format)"
+  [[ "$format" == "install-frp-xtcp-v1" ]] || fatal "XTCP 导入码内容格式不正确。"
+  server_name="$(parse_xtcp_payload_value "$payload" proxyName)"
+  visitor_name="$(parse_xtcp_payload_value "$payload" visitorName)"
+  secret="$(parse_xtcp_payload_value "$payload" secretKey)"
+  bind_addr="$(parse_xtcp_payload_value "$payload" bindAddr)"
+  bind_port="$(parse_xtcp_payload_value "$payload" bindPort)"
+  keep_tunnel_open="$(parse_xtcp_payload_value "$payload" keepTunnelOpen)"
+  fallback="$(parse_xtcp_payload_value "$payload" fallback)"
+  fallback_proxy_name="$(parse_xtcp_payload_value "$payload" fallbackProxyName)"
+  fallback_visitor_name="$(parse_xtcp_payload_value "$payload" fallbackVisitorName)"
+  fallback_timeout_ms="$(parse_xtcp_payload_value "$payload" fallbackTimeoutMs)"
+
+  mkdir -p "${file%/*}"
+  : > "$file"
+  if [[ "$fallback" == "true" ]]; then
+    cat >> "$file" <<EOF_XTCP_STCP_VISITOR
+[[visitors]]
+name = "$(toml_escape "$fallback_visitor_name")"
+type = "stcp"
+serverName = "$(toml_escape "$fallback_proxy_name")"
+secretKey = "$(toml_escape "$secret")"
+bindPort = -1
+
+EOF_XTCP_STCP_VISITOR
+  fi
+
+  cat >> "$file" <<EOF_XTCP_VISITOR
+[[visitors]]
+name = "$(toml_escape "$visitor_name")"
+type = "xtcp"
+serverName = "$(toml_escape "$server_name")"
+secretKey = "$(toml_escape "$secret")"
+bindAddr = "$(toml_escape "$bind_addr")"
+bindPort = ${bind_port}
+keepTunnelOpen = ${keep_tunnel_open}
+EOF_XTCP_VISITOR
+
+  if [[ "$fallback" == "true" ]]; then
+    cat >> "$file" <<EOF_XTCP_FALLBACK
+fallbackTo = "$(toml_escape "$fallback_visitor_name")"
+fallbackTimeoutMs = ${fallback_timeout_ms}
+EOF_XTCP_FALLBACK
+  fi
+
+  chown root:"$FRP_USER" "$file" 2>/dev/null || true
+  chmod 640 "$file" 2>/dev/null || true
+}
+
+select_frpc_split_dir_for_write() {
+  local target name
+  echo "写入目标：1) 默认 frpc  2) 命名 frpc 实例"
+  target="$(ask "请选择" "1")"
+  case "$target" in
+    1|default|frpc)
+      SELECTED_FRPC_CONFIG="$FRPC_CONFIG"
+      SELECTED_FRPC_SPLIT_DIR="$FRPC_CONF_DIR"
+      SELECTED_FRPC_SERVICE="frpc"
+      ;;
+    2|instance)
+      name="$(ask_required "实例名" "")"
+      validate_instance_name "$name" || { warn "实例名不合法：$name"; return 1; }
+      SELECTED_FRPC_CONFIG="$(instance_frpc_config "$name")"
+      SELECTED_FRPC_SPLIT_DIR="$(instance_frpc_conf_dir "$name")"
+      SELECTED_FRPC_SERVICE="$(instance_service_name "$name")"
+      ;;
+    *) warn "无效选择"; return 1 ;;
+  esac
+  mkdir -p "$SELECTED_FRPC_SPLIT_DIR"
+}
+
+create_xtcp_exposed_and_code() {
+  create_dirs_and_user
+  local server_addr server_port name secret local_ip local_port bind_addr bind_port keep_open fallback
+  local fallback_proxy fallback_visitor timeout passphrase payload code safe_name file
+  select_frpc_split_dir_for_write || return 0
+  server_addr="$(ask_required "导入端连接的 frps 地址/IP/域名" "")"
+  server_port="$(ask_port "导入端连接的 frps 端口" "7000")"
+  name="$(ask_required "XTCP 代理名 proxyName" "p2p_ssh")"
+  secret="$(ask "secretKey，留空随机生成" "")"
+  [[ -z "$secret" ]] && secret="$(random_secret)"
+  local_ip="$(ask "被访问本地服务 IP localIP" "127.0.0.1")"
+  local_port="$(ask_port "被访问本地服务端口 localPort" "22")"
+  bind_addr="$(ask "访问端本地监听地址 bindAddr" "127.0.0.1")"
+  bind_port="$(ask_port "访问端本地监听端口 bindPort" "6000")"
+  keep_open="$(ask_yes_no_value "访问端是否 keepTunnelOpen" "n")"
+  fallback="$(ask_yes_no_value "是否生成 STCP fallback" "Y")"
+  fallback_proxy="${name}_stcp"
+  fallback_visitor="${name}_stcp_fallback"
+  timeout="$(ask "fallbackTimeoutMs" "200")"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=200
+
+  safe_name="$(safe_filename "$name")"
+  file="${SELECTED_FRPC_SPLIT_DIR}/${safe_name}.toml"
+  if [[ -f "$file" ]]; then
+    if confirm "配置 ${file} 已存在，是否覆盖" "n"; then
+      backup_file "$file" >/dev/null || true
+    else
+      return 0
+    fi
+  fi
+  write_xtcp_exposed_config "$file" "$name" "$secret" "$local_ip" "$local_port" "$fallback" "$fallback_proxy"
+  verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"
+
+  payload="$(render_xtcp_payload "$server_addr" "$server_port" "$name" "${name}_visitor" "$secret" "$bind_addr" "$bind_port" "$keep_open" "$fallback" "$fallback_proxy" "$fallback_visitor" "$timeout")"
+  passphrase="$(ask "导入码加密口令，留空随机生成" "")"
+  [[ -z "$passphrase" ]] && passphrase="$(random_secret | cut -c1-20)"
+  code="$(encrypt_payload_code "IFRP-XTCP-V1" "$passphrase" "$payload")"
+
+  warn "下面的导入码和口令合在一起等同于 secretKey，请勿公开。"
+  echo
+  echo "========== XTCP 加密导入码 =========="
+  echo "$code"
+  echo "========== 解密码 =========="
+  echo "$passphrase"
+  echo "===================================="
+}
+
+import_xtcp_code_to_visitor() {
+  create_dirs_and_user
+  local code passphrase payload visitor_name safe_name file
+  select_frpc_split_dir_for_write || return 0
+  warn "请粘贴 XTCP 加密导入码，格式为 IFRP-XTCP-V1:..."
+  code="$(ask_required "XTCP 导入码" "")"
+  passphrase="$(ask_required "解密码" "")"
+  payload="$(decrypt_payload_code "IFRP-XTCP-V1" "$passphrase" "$code")"
+  visitor_name="$(parse_xtcp_payload_value "$payload" visitorName)"
+  [[ -n "$visitor_name" ]] || fatal "导入码缺少 visitorName。"
+  safe_name="$(safe_filename "$visitor_name")"
+  file="${SELECTED_FRPC_SPLIT_DIR}/${safe_name}.toml"
+  if [[ -f "$file" ]]; then
+    if confirm "配置 ${file} 已存在，是否覆盖" "n"; then
+      backup_file "$file" >/dev/null || true
+    else
+      return 0
+    fi
+  fi
+  write_xtcp_visitor_config_from_payload "$file" "$payload"
+  verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"
+  if systemctl list-unit-files "${SELECTED_FRPC_SERVICE}.service" >/dev/null 2>&1; then
+    if confirm "是否重启 ${SELECTED_FRPC_SERVICE} 使配置生效" "Y"; then
+      systemctl restart "$SELECTED_FRPC_SERVICE"
+      systemctl --no-pager --full status "$SELECTED_FRPC_SERVICE" || true
+    fi
+  fi
+  ok "已导入 XTCP 访问端配置：$file"
+}
+
+xtcp_pair_menu() {
+  while true; do
+    echo
+    info "XTCP / STCP 加密导入码"
+    cat <<'MENU_XTCP_CODE'
+1) 创建被访问端 XTCP 配置并生成加密导入码
+2) 粘贴加密导入码生成访问端配置
+0) 返回
+MENU_XTCP_CODE
+    local choice
+    choice="$(ask "请选择" "1")"
+    case "$choice" in
+      1) create_xtcp_exposed_and_code; pause ;;
+      2) import_xtcp_code_to_visitor; pause ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择"; pause ;;
+    esac
+  done
 }
 
 safe_filename() {
@@ -1305,11 +1872,229 @@ show_summary() {
   fi
 }
 
-manage_service_menu() {
-  local svc action
-  echo "服务：1) frps  2) frpc"
-  svc="$(ask "请选择" "1")"
-  case "$svc" in 1|frps) svc="frps" ;; 2|frpc) svc="frpc" ;; *) warn "无效选择"; return ;; esac
+export_frps_pairing_code() {
+  create_dirs_and_user
+  local default_port token server_addr server_port proto tls_enable pool_count dns_server user_name passphrase payload code
+  default_port="$(read_toml_value "$FRPS_CONFIG" "bindPort")"
+  [[ -n "$default_port" ]] || default_port="7000"
+  if [[ -s "$TOKEN_FILE" ]]; then
+    token="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+  else
+    token="$(read_toml_value "$FRPS_CONFIG" "auth.token")"
+  fi
+  [[ -n "$token" ]] || token="$(ask_required "未找到 frps token，请输入 token" "")"
+
+  echo
+  info "导出 frps -> frpc 加密接入码"
+  server_addr="$(ask_required "新客户端连接的 frps 公网地址/IP/域名" "")"
+  server_port="$(ask_port "新客户端连接的 frps 端口" "$default_port")"
+  echo "通信协议可选：tcp / kcp / quic / websocket / wss"
+  proto="$(ask "transport.protocol" "tcp")"
+  case "$proto" in tcp|kcp|quic|websocket|wss) ;; *) warn "未知协议，回退 tcp"; proto="tcp" ;; esac
+  tls_enable="$(ask_yes_no_value "是否启用 frpc->frps TLS；新版默认启用，建议保留" "Y")"
+  pool_count="$(ask "连接池数量 transport.poolCount" "0")"
+  [[ "$pool_count" =~ ^[0-9]+$ ]] || pool_count=0
+  dns_server="$(ask "新客户端自定义 DNS，留空使用系统 DNS" "")"
+  user_name="$(ask "新客户端 user，留空不设置" "")"
+  passphrase="$(ask "配对码加密口令，留空随机生成" "")"
+  [[ -z "$passphrase" ]] && passphrase="$(random_secret | cut -c1-20)"
+
+  payload="$(render_frpc_pairing_payload "$server_addr" "$server_port" "$token" "$proto" "$tls_enable" "$pool_count" "$dns_server" "$user_name")"
+  code="$(encrypt_payload_code "IFRP-FRPC-V1" "$passphrase" "$payload")"
+
+  warn "下面的配对码和口令合在一起等同于 frps token，请勿公开。"
+  echo
+  echo "========== frps -> frpc 加密接入码 =========="
+  echo "$code"
+  echo "========== 解密码 =========="
+  echo "$passphrase"
+  echo "============================================"
+}
+
+import_frps_pairing_code() {
+  create_dirs_and_user
+  local code passphrase payload target name config split_dir token_file log_file store_file service
+  warn "请粘贴 frps 接入配对码，格式为 IFRP-FRPC-V1:..."
+  code="$(ask_required "frps 接入配对码" "")"
+  passphrase="$(ask_required "解密码" "")"
+  payload="$(decrypt_payload_code "IFRP-FRPC-V1" "$passphrase" "$code")"
+
+  echo "导入目标：1) 默认 frpc  2) 命名 frpc 实例"
+  target="$(ask "请选择" "1")"
+  case "$target" in
+    1|default|frpc)
+      config="$FRPC_CONFIG"
+      split_dir="$FRPC_CONF_DIR"
+      token_file="$TOKEN_FILE"
+      log_file="${LOG_DIR}/frpc.log"
+      store_file="$FRPC_STORE"
+      service="frpc"
+      ;;
+    2|instance)
+      name="$(ask_required "实例名" "")"
+      validate_instance_name "$name" || { warn "实例名不合法：$name"; return 0; }
+      config="$(instance_frpc_config "$name")"
+      split_dir="$(instance_frpc_conf_dir "$name")"
+      token_file="$(instance_token_file "$name")"
+      log_file="$(instance_log_file "$name")"
+      store_file="$(instance_dir "$name")/frpc-store.json"
+      service="$(instance_service_name "$name")"
+      write_frpc_template_service
+      ;;
+    *) warn "无效选择"; return 0 ;;
+  esac
+
+  if [[ -f "$config" ]]; then
+    if confirm "配置 ${config} 已存在，是否覆盖" "n"; then
+      backup_file "$config" >/dev/null || true
+    else
+      return 0
+    fi
+  fi
+
+  write_frpc_config_from_pairing_payload "$config" "$split_dir" "$token_file" "$log_file" "$store_file" "$payload"
+  verify_config "${INSTALL_DIR}/frpc" "$config"
+  if systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
+    if confirm "是否重启 ${service} 使配置生效" "Y"; then
+      systemctl restart "$service"
+      systemctl --no-pager --full status "$service" || true
+    fi
+  fi
+  ok "已导入 frps 接入配置：$config"
+}
+
+manage_named_frpc_service_action() {
+  local name action service
+  name="$(ask_required "实例名" "")"
+  validate_instance_name "$name" || { warn "实例名不合法：$name"; return 0; }
+  service="$(instance_service_name "$name")"
+  echo "操作：1) status  2) start  3) stop  4) restart  5) logs -f  6) enable  7) disable"
+  action="$(ask "请选择" "1")"
+  case "$action" in
+    1|status) systemctl --no-pager --full status "$service" || true ;;
+    2|start) systemctl start "$service"; systemctl --no-pager --full status "$service" || true ;;
+    3|stop) systemctl stop "$service" ;;
+    4|restart) systemctl restart "$service"; systemctl --no-pager --full status "$service" || true ;;
+    5|logs) journalctl -u "$service" -n 100 -f ;;
+    6|enable) systemctl enable "$service" ;;
+    7|disable) systemctl disable "$service" ;;
+    *) warn "无效选择" ;;
+  esac
+}
+
+delete_named_frpc_instance() {
+  local name dir service
+  name="$(ask_required "要删除的实例名" "")"
+  validate_instance_name "$name" || { warn "实例名不合法：$name"; return 0; }
+  dir="$(instance_dir "$name")"
+  service="$(instance_service_name "$name")"
+  [[ -d "$dir" ]] || { warn "实例目录不存在：$dir"; return 0; }
+  warn "即将删除实例 ${name}，目录：$dir"
+  if confirm "确认继续" "n"; then
+    systemctl stop "$service" 2>/dev/null || true
+    systemctl disable "$service" 2>/dev/null || true
+    rm -rf "$dir"
+    ok "已删除实例：$name"
+  fi
+}
+
+manage_frpc_instances_menu() {
+  while true; do
+    echo
+    info "frpc 命名实例管理"
+    echo "实例目录：$FRPC_CLIENTS_DIR"
+    cat <<'MENU_FRPC_INSTANCES'
+1) 列出命名 frpc 实例
+2) 新建/重配命名 frpc 实例
+3) 管理命名实例 systemd 服务
+4) 校验命名实例配置
+5) 删除命名实例
+0) 返回
+MENU_FRPC_INSTANCES
+    local choice name config
+    choice="$(ask "请选择" "1")"
+    case "$choice" in
+      1|list) list_frpc_instances || true; pause ;;
+      2|create|configure) configure_named_frpc_instance; pause ;;
+      3|service) manage_named_frpc_service_action; pause ;;
+      4|verify)
+        name="$(ask_required "实例名" "")"
+        validate_instance_name "$name" || { warn "实例名不合法：$name"; pause; continue; }
+        config="$(instance_frpc_config "$name")"
+        verify_config "${INSTALL_DIR}/frpc" "$config"
+        pause
+        ;;
+      5|delete|remove) delete_named_frpc_instance; pause ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择"; pause ;;
+    esac
+  done
+}
+
+frps_management_menu() {
+  while true; do
+    echo
+    info "frps 服务端管理"
+    cat <<'MENU_FRPS'
+1) 安装/更新 frps 服务端
+2) 管理 frps systemd 服务
+3) 校验 frps 配置
+4) 查看 frps 配置
+5) 查看 frps 日志
+6) 导出 frpc 加密接入码
+0) 返回
+MENU_FRPS
+    local choice
+    choice="$(ask "请选择" "1")"
+    case "$choice" in
+      1) install_frps_flow; pause ;;
+      2) manage_single_service_menu frps; pause ;;
+      3) verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"; pause ;;
+      4) show_config_file "$FRPS_CONFIG" "frps 主配置" "true"; pause ;;
+      5) show_service_log frps "200" "false"; pause ;;
+      6) export_frps_pairing_code; pause ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择"; pause ;;
+    esac
+  done
+}
+
+frpc_management_menu() {
+  while true; do
+    echo
+    info "frpc 客户端管理"
+    cat <<'MENU_FRPC'
+1) 安装/更新默认 frpc 客户端
+2) 管理命名 frpc 实例
+3) 导入 frps 加密接入码
+4) 添加/套用默认 frpc 代理配置
+5) XTCP / STCP 加密导入码
+6) 管理默认 frpc systemd 服务
+7) 校验默认 frpc 配置
+8) 查看默认 frpc 配置
+9) 查看默认 frpc 日志
+0) 返回
+MENU_FRPC
+    local choice
+    choice="$(ask "请选择" "1")"
+    case "$choice" in
+      1) install_frpc_flow; pause ;;
+      2) manage_frpc_instances_menu ;;
+      3) import_frps_pairing_code; pause ;;
+      4) add_proxy_wizard; pause ;;
+      5) xtcp_pair_menu ;;
+      6) manage_single_service_menu frpc; pause ;;
+      7) verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"; pause ;;
+      8) show_config_file "$FRPC_CONFIG" "frpc 默认主配置" "true"; show_frpc_split_configs "true"; pause ;;
+      9) show_service_log frpc "200" "false"; pause ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择"; pause ;;
+    esac
+  done
+}
+
+manage_single_service_menu() {
+  local svc="$1" action
   echo "操作：1) status  2) start  3) stop  4) restart  5) logs -f  6) enable  7) disable"
   action="$(ask "请选择" "1")"
   case "$action" in
@@ -1438,6 +2223,154 @@ MENU_CONFIG
     0|q|Q) return 0 ;;
     *) warn "无效选择" ;;
   esac
+}
+
+choose_editor() {
+  local editor="${EDITOR:-}"
+  if [[ -n "$editor" ]] && command -v "$editor" >/dev/null 2>&1; then
+    printf '%s' "$editor"
+    return 0
+  fi
+  if has_cmd nano; then
+    printf 'nano'
+  elif has_cmd vim; then
+    printf 'vim'
+  elif has_cmd vi; then
+    printf 'vi'
+  else
+    return 1
+  fi
+}
+
+backup_file() {
+  local file="$1" backup
+  [[ -f "$file" ]] || return 1
+  backup="${file}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$file" "$backup"
+  printf '%s' "$backup"
+}
+
+edit_config_file() {
+  local file="$1" title="$2" bin="${3:-}" service="${4:-}" editor backup tmp
+  echo
+  info "编辑 ${title}"
+  echo "路径：$file"
+  mkdir -p "${file%/*}"
+  if [[ ! -f "$file" ]]; then
+    if confirm "文件不存在，是否创建" "Y"; then
+      : > "$file"
+    else
+      return 0
+    fi
+  fi
+
+  backup="$(backup_file "$file" || true)"
+  [[ -n "$backup" ]] && ok "已备份：$backup"
+
+  if editor="$(choose_editor)"; then
+    "$editor" "$file"
+  else
+    warn "未找到 nano/vim/vi，改用粘贴覆盖模式。"
+    tmp="$(mktemp)"
+    paste_until_eof_to_file "$tmp"
+    if confirm "是否用粘贴内容覆盖 ${file}" "Y"; then
+      cp "$tmp" "$file"
+    fi
+    rm -f "$tmp"
+  fi
+
+  chown root:"$FRP_USER" "$file" 2>/dev/null || true
+  chmod 640 "$file" 2>/dev/null || true
+
+  if [[ -n "$bin" ]]; then
+    if ! verify_config "$bin" "$file"; then
+      warn "配置校验失败：$file"
+      if [[ -n "$backup" ]] && confirm "是否恢复备份" "Y"; then
+        cp -a "$backup" "$file"
+        ok "已恢复：$backup"
+      fi
+      return 1
+    fi
+  fi
+
+  if [[ -n "$service" ]] && systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
+    if confirm "是否重启 ${service} 使配置生效" "Y"; then
+      systemctl restart "$service"
+      systemctl --no-pager --full status "$service" || true
+    fi
+  fi
+}
+
+choose_frpc_split_config() {
+  local dir="${1:-$FRPC_CONF_DIR}" files=() f idx choice
+  SELECTED_CONFIG_FILE=""
+  [[ -d "$dir" ]] || { warn "目录不存在：$dir"; return 1; }
+  while IFS= read -r -d '' f; do
+    files+=("$f")
+  done < <(find "$dir" -maxdepth 1 -type f -name '*.toml' -print0 2>/dev/null | sort -z)
+  if (( ${#files[@]} == 0 )); then
+    warn "没有找到配置：${dir}/*.toml"
+    return 1
+  fi
+  echo
+  info "选择 frpc 拆分配置"
+  idx=1
+  for f in "${files[@]}"; do
+    printf '%s) %s\n' "$idx" "$(basename "$f")"
+    idx=$((idx+1))
+  done
+  echo "0) 返回"
+  choice="$(ask "请选择" "1")"
+  [[ "$choice" == "0" || "$choice" =~ ^[Qq]$ ]] && return 1
+  if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#files[@]} )); then
+    SELECTED_CONFIG_FILE="${files[$((choice-1))]}"
+    return 0
+  fi
+  warn "无效选择。"
+  return 1
+}
+
+config_management_menu() {
+  while true; do
+    echo
+    info "配置管理"
+    cat <<'MENU_CONFIG_MANAGE'
+1) 编辑 frps 主配置
+2) 编辑默认 frpc 主配置
+3) 编辑默认 frpc.d 代理配置
+4) 编辑命名 frpc 实例主配置
+5) 编辑命名 frpc 实例代理配置
+0) 返回
+MENU_CONFIG_MANAGE
+    local choice name config dir
+    choice="$(ask "请选择" "1")"
+    case "$choice" in
+      1|frps) edit_config_file "$FRPS_CONFIG" "frps 主配置" "${INSTALL_DIR}/frps" "frps"; pause ;;
+      2|frpc) edit_config_file "$FRPC_CONFIG" "默认 frpc 主配置" "${INSTALL_DIR}/frpc" "frpc"; pause ;;
+      3|frpc.d)
+        choose_frpc_split_config "$FRPC_CONF_DIR" || { pause; continue; }
+        edit_config_file "$SELECTED_CONFIG_FILE" "默认 frpc 代理配置" "${INSTALL_DIR}/frpc" "frpc"
+        pause
+        ;;
+      4|instance-main)
+        name="$(ask_required "实例名" "")"
+        validate_instance_name "$name" || { warn "实例名不合法：$name"; pause; continue; }
+        config="$(instance_frpc_config "$name")"
+        edit_config_file "$config" "frpc 实例 ${name} 主配置" "${INSTALL_DIR}/frpc" "$(instance_service_name "$name")"
+        pause
+        ;;
+      5|instance-proxy)
+        name="$(ask_required "实例名" "")"
+        validate_instance_name "$name" || { warn "实例名不合法：$name"; pause; continue; }
+        dir="$(instance_frpc_conf_dir "$name")"
+        choose_frpc_split_config "$dir" || { pause; continue; }
+        edit_config_file "$SELECTED_CONFIG_FILE" "frpc 实例 ${name} 代理配置" "${INSTALL_DIR}/frpc" "$(instance_service_name "$name")"
+        pause
+        ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择"; pause ;;
+    esac
+  done
 }
 
 show_log_file() {
@@ -1678,33 +2611,31 @@ main_menu() {
   while true; do
     print_banner
     cat <<MENU
-1) 安装/更新 frps 服务端
-2) 安装/更新 frpc 客户端
+1) frps 服务端管理
+2) frpc 客户端管理
 3) 仅安装/更新 frp 二进制文件
-4) 添加/套用 frpc 配置（自定义预设）
-5) 管理 systemd 服务
-6) 校验配置
-7) 查看当前配置
-8) 查看日志
-9) 查看安装摘要
+4) 配置管理（编辑/校验/重启）
+5) 校验全部配置
+6) 查看当前配置
+7) 查看日志
+8) 查看安装摘要
+9) 配置 GitHub 下载代理
 10) 卸载 frp
-11) 配置 GitHub 下载代理
 0) 退出
 MENU
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
-      1) install_frps_flow; pause ;;
-      2) install_frpc_flow; pause ;;
+      1) frps_management_menu ;;
+      2) frpc_management_menu ;;
       3) install_or_update_binaries; pause ;;
-      4) add_proxy_wizard; pause ;;
-      5) manage_service_menu; pause ;;
-      6) verify_all_configs; pause ;;
-      7) show_current_configs; pause ;;
-      8) show_logs_menu; pause ;;
-      9) show_summary; pause ;;
+      4) config_management_menu ;;
+      5) verify_all_configs; pause ;;
+      6) show_current_configs; pause ;;
+      7) show_logs_menu; pause ;;
+      8) show_summary; pause ;;
+      9) configure_github_proxy; pause ;;
       10) uninstall_frp; pause ;;
-      11) configure_github_proxy; pause ;;
       0|q|Q) exit 0 ;;
       *) warn "无效选择"; pause ;;
     esac
