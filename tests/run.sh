@@ -997,8 +997,8 @@ test_install_state_and_status_bar() {
   require_function should_skip_frp_download
   require_function render_component_status
   require_function render_status_bar
-  require_function frpc_instance_status_counts
-  require_function ui_instance_state
+  require_function frpc_client_status_counts
+  require_function ui_client_count_state
   require_function resolve_default_version
   require_function render_main_menu
   require_function render_frps_menu
@@ -1066,8 +1066,9 @@ EOF_FAKE_FRPC_RESTORE
   )"
   [[ "$status_bar" == *"状态："* ]] || fail "status bar missing title"
   [[ "$status_bar" == *"服务端:未运行"* ]] || fail "status bar missing server summary: ${status_bar}"
-  [[ "$status_bar" == *"默认客户端:未运行"* ]] || fail "status bar missing default client summary: ${status_bar}"
-  [[ "$status_bar" == *"命名实例:0个/运行0"* ]] || fail "status bar missing empty instance summary: ${status_bar}"
+  [[ "$status_bar" == *"客户端:1个/运行0"* ]] || fail "status bar missing default client count: ${status_bar}"
+  [[ "$status_bar" != *"默认客户端"* ]] || fail "status bar should not expose default client wording: ${status_bar}"
+  [[ "$status_bar" != *"命名实例"* ]] || fail "status bar should not expose instance wording: ${status_bar}"
   [[ "$status_bar" != *"v0."* ]] || fail "main status should not show detailed versions: ${status_bar}"
   [[ "$status_bar" != *"已配置"* ]] || fail "main status should not show config details: ${status_bar}"
   [[ "$(printf '%s\n' "$status_bar" | wc -l | tr -d '[:space:]')" == "1" ]] || fail "status bar should be one line"
@@ -1089,8 +1090,9 @@ EOF_FAKE_FRPC_RESTORE
       render_status_bar
     )
   )"
-  [[ "$status_bar" == *"默认客户端:未运行"* ]] || fail "running instance status should keep default client separate: ${status_bar}"
-  [[ "$status_bar" == *"命名实例:1个/运行1"* ]] || fail "status bar should show running named instances: ${status_bar}"
+  [[ "$status_bar" == *"客户端:2个/运行1"* ]] || fail "status bar should aggregate default and running named clients: ${status_bar}"
+  [[ "$status_bar" != *"默认客户端"* ]] || fail "status bar should not split default client from named clients: ${status_bar}"
+  [[ "$status_bar" != *"命名实例"* ]] || fail "status bar should use client wording for named clients: ${status_bar}"
 
   status_bar="$(
     (
@@ -1110,7 +1112,43 @@ EOF_FAKE_FRPC_RESTORE
       render_status_bar
     )
   )"
-  [[ "$status_bar" == *"命名实例:2个/运行1/异常1"* ]] || fail "status bar should show failed named instances: ${status_bar}"
+  [[ "$status_bar" == *"客户端:3个/运行1/异常1"* ]] || fail "status bar should aggregate failed named clients: ${status_bar}"
+
+  status_bar="$(
+    (
+      FRPC_CLIENTS_DIR="${TMP_DIR}/status-bar-default-active"
+      mkdir -p "$FRPC_CLIENTS_DIR"
+      has_cmd() { [[ "$1" == "systemctl" ]]; }
+      service_exists() { [[ "$1" == "frpc" ]]; }
+      systemctl() {
+        if [[ "$1" == "is-active" && "$2" == "frpc" ]]; then
+          printf 'active\n'
+        else
+          printf 'inactive\n'
+        fi
+      }
+      render_status_bar
+    )
+  )"
+  [[ "$status_bar" == *"客户端:1个/运行1"* ]] || fail "status bar should count running default frpc: ${status_bar}"
+
+  status_bar="$(
+    (
+      FRPC_CLIENTS_DIR="${TMP_DIR}/status-bar-default-failed"
+      mkdir -p "$FRPC_CLIENTS_DIR"
+      has_cmd() { [[ "$1" == "systemctl" ]]; }
+      service_exists() { [[ "$1" == "frpc" ]]; }
+      systemctl() {
+        if [[ "$1" == "is-active" && "$2" == "frpc" ]]; then
+          printf 'failed\n'
+        else
+          printf 'inactive\n'
+        fi
+      }
+      render_status_bar
+    )
+  )"
+  [[ "$status_bar" == *"客户端:1个/运行0/异常1"* ]] || fail "status bar should count failed default frpc: ${status_bar}"
 
   local menu
   menu="$(render_main_menu)"
