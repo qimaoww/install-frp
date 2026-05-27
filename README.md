@@ -48,7 +48,7 @@ sudo bash frp.sh
 菜单顶部只显示运行概况；版本和配置细节在子菜单和安装摘要里查看：
 
 ```text
-frp 管理脚本 2026.05.27-r9
+frp 管理脚本 2026.05.27-r11
 状态：服务端:未运行 | 客户端:运行中 | 实例:2
 ```
 
@@ -215,10 +215,11 @@ bash <(curl -fsSL 'https://raw.githubusercontent.com/qimaoww/install-frp/main/fr
 
 创建被访问端 XTCP 配置后，脚本会提示重启对应 `frpc`，让 `[[proxies]]` 注册到 `frps`。如果跳过这一步，访问端会看到类似 `xtcp server for [name] doesn't exist` 的错误。
 
-脚本会把访问端 XTCP 底层协议写入导入码。默认使用 `kcp`；如果你想沿用 frp 默认行为，也可以选择 `quic`。当日志里出现 Docker、VPN、`100.64.0.0/10` 之类辅助地址干扰时，建议启用“禁用辅助地址”。新生成配置会在被访问端 proxy 和访问端 visitor 两边写入：
+脚本会把访问端 XTCP 底层协议写入导入码。默认使用 `quic`；如果你的网络环境下 `kcp` 更稳，也可以手动选择 `kcp`。当日志里出现 Docker、VPN、`100.64.0.0/10` 之类辅助地址干扰时，建议启用“禁用辅助地址”。新生成配置会在被访问端 proxy 和访问端 visitor 两边写入：
 
 ```toml
-protocol = "kcp"
+protocol = "quic"
+keepTunnelOpen = true
 
 [proxies.natTraversal]
 disableAssistedAddrs = true
@@ -227,7 +228,7 @@ disableAssistedAddrs = true
 disableAssistedAddrs = true
 ```
 
-旧配置可以直接在 XTCP 菜单选择“修复现有 XTCP 配置”，脚本会备份后把现有 `quic` visitor 改成 `kcp`，把 `fallbackTimeoutMs` 调到 5000，并补齐 `disableAssistedAddrs`。
+旧配置可以直接在 XTCP 菜单选择“修复现有 XTCP 配置”，脚本会备份后把协议保持/改为 `quic`，保留 `keepTunnelOpen = true`，把 `fallbackTimeoutMs` 调到 5000，并补齐 `disableAssistedAddrs`。
 
 如果启用 STCP fallback，脚本会在被访问端生成 `xtcp + stcp` 两个 proxy，在访问端生成 `stcp visitor + xtcp visitor`，并自动写入：
 

@@ -184,7 +184,7 @@ test_xtcp_import_code_helpers() {
     "p2p_ssh_stcp" \
     "p2p_ssh_stcp_fallback" \
     "5000" \
-    "kcp" \
+    "quic" \
     "true")"
 
   assert_eq "install-frp-xtcp-v1" "$(parse_xtcp_payload_value "$payload" format)" "xtcp payload format"
@@ -204,7 +204,8 @@ test_xtcp_import_code_helpers() {
   visitor_file="${TMP_DIR}/xtcp-visitor.toml"
   write_xtcp_visitor_config_from_payload "$visitor_file" "$payload"
   assert_contains 'type = "xtcp"' "$visitor_file" "xtcp visitor rendered"
-  assert_contains 'protocol = "kcp"' "$visitor_file" "xtcp protocol rendered"
+  assert_contains 'protocol = "quic"' "$visitor_file" "xtcp protocol rendered"
+  assert_contains 'keepTunnelOpen = true' "$visitor_file" "xtcp keep tunnel open rendered"
   assert_contains 'fallbackTo = "p2p_ssh_stcp_fallback"' "$visitor_file" "xtcp fallback rendered"
   assert_contains 'fallbackTimeoutMs = 5000' "$visitor_file" "xtcp fallback timeout rendered"
   assert_contains '[visitors.natTraversal]' "$visitor_file" "xtcp nat traversal section rendered"
@@ -226,8 +227,9 @@ keepTunnelOpen = false
 fallbackTo = "p2p_ssh_stcp_fallback"
 fallbackTimeoutMs = 200
 EOF_OLD_XTCP_VISITOR
-  tune_xtcp_config_file "$old_visitor_file" "kcp" "true" "5000"
-  assert_contains 'protocol = "kcp"' "$old_visitor_file" "xtcp repair switches visitor to kcp"
+  tune_xtcp_config_file "$old_visitor_file" "quic" "true" "5000" "true"
+  assert_contains 'protocol = "quic"' "$old_visitor_file" "xtcp repair keeps visitor on quic"
+  assert_contains 'keepTunnelOpen = true' "$old_visitor_file" "xtcp repair enables keep tunnel open"
   assert_contains 'fallbackTimeoutMs = 5000' "$old_visitor_file" "xtcp repair raises fallback timeout"
   assert_contains '[visitors.natTraversal]' "$old_visitor_file" "xtcp repair adds visitor nat traversal"
 }

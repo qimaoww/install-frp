@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r9}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r11}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -1506,14 +1506,15 @@ EOF_XTCP_NAT
 }
 
 tune_xtcp_config_file() {
-  local file="$1" protocol="${2:-kcp}" disable_assisted_addrs="${3:-true}" fallback_timeout_ms="${4:-5000}" tmp
+  local file="$1" protocol="${2:-quic}" disable_assisted_addrs="${3:-true}" fallback_timeout_ms="${4:-5000}" keep_tunnel_open="${5:-true}" tmp
   [[ -f "$file" ]] || fatal "配置文件不存在：$file"
-  case "$protocol" in quic|kcp) ;; *) protocol="kcp" ;; esac
+  case "$protocol" in quic|kcp) ;; *) protocol="quic" ;; esac
   [[ "$fallback_timeout_ms" =~ ^[0-9]+$ ]] || fallback_timeout_ms=5000
   [[ "$disable_assisted_addrs" == "true" ]] || disable_assisted_addrs="false"
+  [[ "$keep_tunnel_open" == "true" ]] || keep_tunnel_open="false"
 
   tmp="$(mktemp)"
-  awk -v protocol="$protocol" -v disable="$disable_assisted_addrs" -v timeout="$fallback_timeout_ms" '
+  awk -v protocol="$protocol" -v disable="$disable_assisted_addrs" -v timeout="$fallback_timeout_ms" -v keep="$keep_tunnel_open" '
     function reset_block() {
       n = 0
       kind = ""
@@ -1543,10 +1544,14 @@ tune_xtcp_config_file() {
           skip_nat = 0
         }
         if (kind == "visitors" && line ~ /^[[:space:]]*protocol[[:space:]]*=/) continue
+        if (kind == "visitors" && line ~ /^[[:space:]]*keepTunnelOpen[[:space:]]*=/) continue
         if (kind == "visitors" && line ~ /^[[:space:]]*fallbackTimeoutMs[[:space:]]*=/) continue
         print line
         if (kind == "visitors" && line ~ /^[[:space:]]*type[[:space:]]*=[[:space:]]*"xtcp"/) {
           print "protocol = \"" protocol "\""
+        }
+        if (kind == "visitors" && line ~ /^[[:space:]]*bindPort[[:space:]]*=/) {
+          print "keepTunnelOpen = " keep
         }
         if (kind == "visitors" && line ~ /^[[:space:]]*fallbackTo[[:space:]]*=/) {
           print "fallbackTimeoutMs = " timeout
@@ -1624,10 +1629,10 @@ create_xtcp_exposed_and_code() {
   local_port="$(ask_port "被访问本地服务端口 localPort" "22")"
   bind_addr="$(ask "访问端本地监听地址 bindAddr" "127.0.0.1")"
   bind_port="$(ask_port "访问端本地监听端口 bindPort" "6000")"
-  protocol="$(ask "访问端 XTCP 底层协议 quic/kcp；QUIC 超时可试 kcp" "kcp")"
-  case "$protocol" in quic|kcp) ;; *) warn "未知协议，回退 kcp"; protocol="kcp" ;; esac
+  protocol="$(ask "访问端 XTCP 底层协议 quic/kcp" "quic")"
+  case "$protocol" in quic|kcp) ;; *) warn "未知协议，回退 quic"; protocol="quic" ;; esac
   disable_assisted="$(ask_yes_no_value "禁用辅助地址；有 Docker/VPN/100.64 地址干扰时建议启用" "Y")"
-  keep_open="$(ask_yes_no_value "访问端是否 keepTunnelOpen" "n")"
+  keep_open="$(ask_yes_no_value "访问端是否 keepTunnelOpen" "Y")"
   fallback="$(ask_yes_no_value "是否生成 STCP fallback" "Y")"
   fallback_proxy="${name}_stcp"
   fallback_visitor="${name}_stcp_fallback"
@@ -1697,14 +1702,14 @@ repair_xtcp_config_menu() {
   local protocol disable_assisted timeout
   select_frpc_split_dir_for_write || return 0
   choose_frpc_split_config "$SELECTED_FRPC_SPLIT_DIR" || return 0
-  protocol="$(ask "XTCP 底层协议 quic/kcp；QUIC 超时建议 kcp" "kcp")"
-  case "$protocol" in quic|kcp) ;; *) warn "未知协议，回退 kcp"; protocol="kcp" ;; esac
+  protocol="$(ask "XTCP 底层协议 quic/kcp" "quic")"
+  case "$protocol" in quic|kcp) ;; *) warn "未知协议，回退 quic"; protocol="quic" ;; esac
   disable_assisted="$(ask_yes_no_value "禁用辅助地址；日志里有 10.x/100.64/172.x 建议启用" "Y")"
   timeout="$(ask "fallbackTimeoutMs" "5000")"
   [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=5000
 
   backup_file "$SELECTED_CONFIG_FILE" >/dev/null || true
-  tune_xtcp_config_file "$SELECTED_CONFIG_FILE" "$protocol" "$disable_assisted" "$timeout"
+  tune_xtcp_config_file "$SELECTED_CONFIG_FILE" "$protocol" "$disable_assisted" "$timeout" "true"
   verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"
   restart_service_if_present "$SELECTED_FRPC_SERVICE"
   ok "已修复 XTCP 配置：$SELECTED_CONFIG_FILE"
