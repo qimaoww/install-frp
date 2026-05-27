@@ -147,7 +147,9 @@ test_config_edit_helpers() {
   require_function backup_file
   require_function edit_config_file
   require_function choose_frpc_split_config
-  require_function config_management_menu
+  require_function show_frpc_split_configs_for_dir
+  require_function frps_config_menu
+  require_function frpc_config_menu
 
   local sample="${TMP_DIR}/sample.toml"
   printf 'value = "original"\n' > "$sample"
@@ -257,7 +259,7 @@ EOF_OLD_XTCP_VISITOR
   assert_contains 'keepTunnelOpen = true' "${xtcp_dir}/p2p_ssh_visitor.toml" "xtcp dir repair keeps tunnel open"
 
   xtcp_menu_body="$(declare -f xtcp_pair_menu)"
-  assert_contains '3) 检查/修复现有配置' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu uses unified check entry"
+  assert_contains 'ui_menu_item 3 "检查/修复现有配置"' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu uses unified check entry"
   assert_not_contains '4) 查看 XTCP 配置摘要' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu removes separate summary entry"
   assert_not_contains 'repair_xtcp_config_menu' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu removes single-file repair path"
   assert_not_contains 'show_xtcp_config_summary_menu' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu removes single-file summary path"
@@ -311,6 +313,12 @@ test_install_state_and_status_bar() {
   require_function render_main_menu
   require_function render_frps_menu
   require_function render_frpc_menu
+  require_function ui_rule
+  require_function ui_header
+  require_function ui_menu_item
+  require_function ui_menu_back
+  require_function ui_state
+  require_function ui_service_state
   require_function curl_download
   require_function service_exists
   require_function service_action
@@ -368,21 +376,28 @@ EOF_FAKE_FRPC_RESTORE
   local menu
   menu="$(render_main_menu)"
   assert_contains '1) 服务端' <(printf '%s\n' "$menu") "compact menu has server entry"
-  assert_contains '5) 工具' <(printf '%s\n' "$menu") "compact menu has tools entry"
-  ! printf '%s\n' "$menu" | grep -Fq 'frps ' || fail "main menu should use short labels"
-  ! printf '%s\n' "$menu" | grep -Fq 'frpc ' || fail "main menu should use short labels"
+  assert_contains '3) 工具/维护' <(printf '%s\n' "$menu") "compact menu has tools entry"
+  ! printf '%s\n' "$menu" | grep -Eq '^3\) 配置$' || fail "main menu should not duplicate config entry"
+  ! printf '%s\n' "$menu" | grep -Eq '^4\) 日志$' || fail "main menu should not duplicate logs entry"
+  ! printf '%s\n' "$menu" | grep -Fq '5)' || fail "main menu should have only three top-level entries"
   ! printf '%s\n' "$menu" | grep -Fq '10)' || fail "main menu should not expose ten top-level entries"
 
   local frpc_menu frps_menu
   frpc_menu="$(render_frpc_menu)"
   frps_menu="$(render_frps_menu)"
   assert_contains '1) 安装/更新' <(printf '%s\n' "$frpc_menu") "frpc menu has short install entry"
-  assert_contains '2) 启动/停止/重启' <(printf '%s\n' "$frpc_menu") "frpc menu exposes restart management"
+  assert_contains '2) 服务管理' <(printf '%s\n' "$frpc_menu") "frpc menu exposes service management"
   assert_contains '5) 代理配置' <(printf '%s\n' "$frpc_menu") "frpc menu has short proxy entry"
+  assert_contains '7) 配置' <(printf '%s\n' "$frpc_menu") "frpc menu groups view edit verify config"
+  ! printf '%s\n' "$frpc_menu" | grep -Fq '9)' || fail "frpc menu should not duplicate separate verify/view entries"
   ! printf '%s\n' "$frpc_menu" | grep -Fq '默认 frpc 客户端' || fail "frpc menu should not repeat long default client text"
   ! printf '%s\n' "$frpc_menu" | grep -Fq 'systemd 服务' || fail "frpc menu should use short service text"
-  assert_contains '2) 启动/停止/重启' <(printf '%s\n' "$frps_menu") "frps menu exposes restart management"
+  assert_contains '2) 服务管理' <(printf '%s\n' "$frps_menu") "frps menu exposes service management"
   assert_contains '3) 接入码' <(printf '%s\n' "$frps_menu") "frps menu has short pairing entry"
+  assert_contains '4) 配置' <(printf '%s\n' "$frps_menu") "frps menu groups view edit verify config"
+  ! printf '%s\n' "$frps_menu" | grep -Fq '6)' || fail "frps menu should not duplicate separate verify/view entries"
+  ! declare -F config_management_menu >/dev/null || fail "top-level duplicate config menu should be removed"
+  ! declare -F show_logs_menu >/dev/null || fail "top-level duplicate logs menu should be removed"
   ! declare -f curl_download | grep -Fq 'curl -fL ' || fail "curl download should be silent and not show progress meter"
   ! grep -Fq 'systemctl --no-pager --full status' "${ROOT_DIR}/frp.sh" || fail "script should not dump full systemd status in normal flow"
   declare -f create_xtcp_exposed_and_code | grep -Fq 'restart_service_if_present "$SELECTED_FRPC_SERVICE"' || fail "xtcp exposed setup should restart/register exposed proxy"

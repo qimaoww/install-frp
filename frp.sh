@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r14}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r15}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -27,9 +27,17 @@ GH_PROXY="${GH_PROXY:-}"
 
 # ---------- colors ----------
 if [[ -t 1 ]]; then
-  C_RESET=$'\033[0m'; C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_BLUE=$'\033[34m'; C_BOLD=$'\033[1m'
+  C_RESET=$'\033[0m'
+  C_RED=$'\033[31m'
+  C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'
+  C_BLUE=$'\033[34m'
+  C_MAGENTA=$'\033[35m'
+  C_CYAN=$'\033[36m'
+  C_DIM=$'\033[2m'
+  C_BOLD=$'\033[1m'
 else
-  C_RESET=''; C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_BOLD=''
+  C_RESET=''; C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_MAGENTA=''; C_CYAN=''; C_DIM=''; C_BOLD=''
 fi
 
 log_event() {
@@ -58,9 +66,56 @@ has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 pause() { read -r -p "按回车继续..." _ || true; }
 
+ui_rule() {
+  printf '%s%s%s\n' "$C_DIM" "----------------------------------------" "$C_RESET"
+}
+
+ui_header() {
+  local title="$1" subtitle="${2:-}"
+  printf '%s%s%s\n' "$C_BOLD$C_CYAN" "$title" "$C_RESET"
+  [[ -n "$subtitle" ]] && printf '%s%s%s\n' "$C_DIM" "$subtitle" "$C_RESET"
+  ui_rule
+}
+
+ui_menu_item() {
+  local key="$1" label="$2" hint="${3:-}"
+  if [[ -n "$hint" ]]; then
+    printf '%s%s)%s %s %s%s%s\n' "$C_GREEN" "$key" "$C_RESET" "$label" "$C_DIM" "$hint" "$C_RESET"
+  else
+    printf '%s%s)%s %s\n' "$C_GREEN" "$key" "$C_RESET" "$label"
+  fi
+}
+
+ui_menu_back() {
+  local label="${1:-返回}"
+  printf '%s0)%s %s\n' "$C_YELLOW" "$C_RESET" "$label"
+}
+
+ui_state() {
+  local text="$1" color="$C_DIM"
+  case "$text" in
+    运行|运行中|active|已配置|自启|enabled|ok|OK) color="$C_GREEN" ;;
+    停止|未运行|未自启|disabled|空配置|静态) color="$C_YELLOW" ;;
+    失败|异常|failed|未安装|未配置|未装服务) color="$C_RED" ;;
+    *) color="$C_DIM" ;;
+  esac
+  printf '%s%s%s' "$color" "$text" "$C_RESET"
+}
+
+ui_service_state() {
+  local state="$1" active enabled
+  if [[ "$state" == */* ]]; then
+    active="${state%%/*}"
+    enabled="${state#*/}"
+    printf '%s/%s' "$(ui_state "$active")" "$(ui_state "$enabled")"
+  else
+    ui_state "$state"
+  fi
+}
+
 menu_title() {
   clear 2>/dev/null || true
-  printf '%s\n' "$1"
+  ui_header "$1"
 }
 
 trim() {
@@ -321,7 +376,8 @@ write_token_file() {
 
 print_banner() {
   clear 2>/dev/null || true
-  printf '%sfrp 管理脚本 %s%s\n' "$C_BOLD" "$SCRIPT_VERSION" "$C_RESET"
+  printf '%sfrp 管理脚本%s %s%s%s\n' "$C_BOLD$C_CYAN" "$C_RESET" "$C_DIM" "$SCRIPT_VERSION" "$C_RESET"
+  ui_rule
   render_status_bar
   echo
 }
@@ -763,7 +819,11 @@ render_component_status() {
   [[ -n "$version" ]] || version="未安装"
   config_state="$(config_status_label "$conf")"
   service_state="$(service_status_label "$service")"
-  printf '%s: %s/%s/%s' "$name" "$version" "$config_state" "$service_state"
+  printf '%s%s:%s %s / %s / %s\n' \
+    "$C_BOLD" "$name" "$C_RESET" \
+    "$(ui_state "$version")" \
+    "$(ui_state "$config_state")" \
+    "$(ui_service_state "$service_state")"
 }
 
 service_brief_label() {
@@ -783,10 +843,11 @@ service_brief_label() {
 render_status_bar() {
   local instance_count
   instance_count="$(list_frpc_instances 2>/dev/null | wc -l | tr -d '[:space:]')"
-  printf '状态：服务端:%s | 客户端:%s | 实例:%s\n' \
-    "$(service_brief_label frps)" \
-    "$(service_brief_label frpc)" \
-    "$instance_count"
+  printf '%s状态：%s 服务端:%s | 客户端:%s | 实例:%s%s%s\n' \
+    "$C_BOLD" "$C_RESET" \
+    "$(ui_state "$(service_brief_label frps)")" \
+    "$(ui_state "$(service_brief_label frpc)")" \
+    "$C_MAGENTA" "$instance_count" "$C_RESET"
 }
 
 validate_instance_name() {
@@ -1950,14 +2011,11 @@ xtcp_config_check_menu() {
 
 xtcp_pair_menu() {
   while true; do
-    echo
-    info "XTCP / STCP 加密导入码"
-    cat <<'MENU_XTCP_CODE'
-1) 创建被访问端 XTCP 配置并生成加密导入码
-2) 粘贴加密导入码生成访问端配置
-3) 检查/修复现有配置
-0) 返回
-MENU_XTCP_CODE
+    menu_title "客户端 / XTCP"
+    ui_menu_item 1 "创建被访问端" "生成加密导入码"
+    ui_menu_item 2 "导入访问端" "粘贴加密导入码"
+    ui_menu_item 3 "检查/修复现有配置"
+    ui_menu_back
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
@@ -2411,15 +2469,12 @@ add_proxy_manual_wizard() {
 
 add_proxy_wizard() {
   while true; do
-    echo
-    info "添加/套用 frpc 客户端配置"
-    cat <<'EOF_ADD_PROXY_MENU'
-1) 套用自定义预设
-2) 管理自定义预设
-3) 高级手动添加代理/访问者
-4) 直接粘贴 TOML 到 frpc.d
-0) 返回
-EOF_ADD_PROXY_MENU
+    menu_title "客户端 / 代理配置"
+    ui_menu_item 1 "套用自定义预设"
+    ui_menu_item 2 "管理自定义预设"
+    ui_menu_item 3 "高级手动添加" "代理 / 访问者"
+    ui_menu_item 4 "直接粘贴 TOML"
+    ui_menu_back
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
@@ -2574,31 +2629,100 @@ delete_named_frpc_instance() {
 
 manage_frpc_instances_menu() {
   while true; do
-    echo
-    info "frpc 命名实例管理"
+    menu_title "客户端 / 实例"
     echo "实例目录：$FRPC_CLIENTS_DIR"
-    cat <<'MENU_FRPC_INSTANCES'
-1) 列出命名 frpc 实例
-2) 新建/重配命名 frpc 实例
-3) 启动/停止/重启命名实例
-4) 校验命名实例配置
-5) 删除命名实例
-0) 返回
-MENU_FRPC_INSTANCES
-    local choice name config
+    ui_menu_item 1 "列出实例"
+    ui_menu_item 2 "新建/重配实例"
+    ui_menu_item 3 "服务管理"
+    ui_menu_item 4 "删除实例" "危险操作"
+    ui_menu_back
+    local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
       1|list) list_frpc_instances || true; pause ;;
       2|create|configure) configure_named_frpc_instance; pause ;;
       3|service) manage_named_frpc_service_action; pause ;;
-      4|verify)
+      4|delete|remove) delete_named_frpc_instance; pause ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择"; pause ;;
+    esac
+  done
+}
+
+frps_config_menu() {
+  while true; do
+    menu_title "服务端 / 配置"
+    render_component_status "frps" "${INSTALL_DIR}/frps" "$FRPS_CONFIG" "frps"
+    echo "配置：$FRPS_CONFIG"
+    ui_menu_item 1 "查看配置"
+    ui_menu_item 2 "编辑配置"
+    ui_menu_item 3 "校验配置"
+    ui_menu_back
+    local choice
+    choice="$(ask "请选择" "1")"
+    case "$choice" in
+      1|view) show_config_file "$FRPS_CONFIG" "frps 主配置" "true"; pause ;;
+      2|edit) edit_config_file "$FRPS_CONFIG" "frps 主配置" "${INSTALL_DIR}/frps" "frps"; pause ;;
+      3|verify) verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"; pause ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择"; pause ;;
+    esac
+  done
+}
+
+frpc_config_menu() {
+  while true; do
+    menu_title "客户端 / 配置"
+    render_component_status "frpc" "${INSTALL_DIR}/frpc" "$FRPC_CONFIG" "frpc"
+    ui_menu_item 1 "默认 frpc"
+    ui_menu_item 2 "命名实例"
+    ui_menu_back
+    local choice name
+    choice="$(ask "请选择" "1")"
+    case "$choice" in
+      1|default|frpc)
+        SELECTED_FRPC_LABEL="默认 frpc"
+        SELECTED_FRPC_CONFIG="$FRPC_CONFIG"
+        SELECTED_FRPC_SPLIT_DIR="$FRPC_CONF_DIR"
+        SELECTED_FRPC_SERVICE="frpc"
+        frpc_config_target_menu_direct
+        ;;
+      2|instance)
         name="$(ask_required "实例名" "")"
         validate_instance_name "$name" || { warn "实例名不合法：$name"; pause; continue; }
-        config="$(instance_frpc_config "$name")"
-        verify_config "${INSTALL_DIR}/frpc" "$config"
+        SELECTED_FRPC_LABEL="实例 ${name}"
+        SELECTED_FRPC_CONFIG="$(instance_frpc_config "$name")"
+        SELECTED_FRPC_SPLIT_DIR="$(instance_frpc_conf_dir "$name")"
+        SELECTED_FRPC_SERVICE="$(instance_service_name "$name")"
+        frpc_config_target_menu_direct
+        ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择"; pause ;;
+    esac
+  done
+}
+
+frpc_config_target_menu_direct() {
+  while true; do
+    menu_title "客户端 / 配置 / ${SELECTED_FRPC_LABEL}"
+    echo "主配置：$SELECTED_FRPC_CONFIG"
+    echo "拆分目录：$SELECTED_FRPC_SPLIT_DIR"
+    ui_menu_item 1 "查看配置"
+    ui_menu_item 2 "编辑主配置"
+    ui_menu_item 3 "编辑拆分配置"
+    ui_menu_item 4 "校验配置"
+    ui_menu_back
+    local choice
+    choice="$(ask "请选择" "1")"
+    case "$choice" in
+      1|view) show_config_file "$SELECTED_FRPC_CONFIG" "${SELECTED_FRPC_LABEL} 主配置" "true"; show_frpc_split_configs_for_dir "$SELECTED_FRPC_SPLIT_DIR" "true"; pause ;;
+      2|edit-main) edit_config_file "$SELECTED_FRPC_CONFIG" "${SELECTED_FRPC_LABEL} 主配置" "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_SERVICE"; pause ;;
+      3|edit-split)
+        choose_frpc_split_config "$SELECTED_FRPC_SPLIT_DIR" || { pause; continue; }
+        edit_config_file "$SELECTED_CONFIG_FILE" "${SELECTED_FRPC_LABEL} 拆分配置" "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_SERVICE"
         pause
         ;;
-      5|delete|remove) delete_named_frpc_instance; pause ;;
+      4|verify) verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -2606,15 +2730,12 @@ MENU_FRPC_INSTANCES
 }
 
 render_frps_menu() {
-  cat <<'MENU_FRPS'
-1) 安装/更新
-2) 启动/停止/重启
-3) 接入码
-4) 校验
-5) 查看
-6) 日志
-0) 返回
-MENU_FRPS
+  ui_menu_item 1 "安装/更新"
+  ui_menu_item 2 "服务管理" "启动 / 停止 / 重启 / 自启"
+  ui_menu_item 3 "接入码" "导出给新 frpc"
+  ui_menu_item 4 "配置" "查看 / 编辑 / 校验"
+  ui_menu_item 5 "日志"
+  ui_menu_back
 }
 
 frps_management_menu() {
@@ -2629,9 +2750,8 @@ frps_management_menu() {
       1) install_frps_flow; pause ;;
       2) manage_single_service_menu frps; pause ;;
       3) export_frps_pairing_code; pause ;;
-      4) verify_config "${INSTALL_DIR}/frps" "$FRPS_CONFIG"; pause ;;
-      5) show_config_file "$FRPS_CONFIG" "frps 主配置" "true"; pause ;;
-      6) show_service_log frps "200" "false"; pause ;;
+      4) frps_config_menu ;;
+      5) show_service_log frps "200" "false"; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -2639,18 +2759,15 @@ frps_management_menu() {
 }
 
 render_frpc_menu() {
-  cat <<'MENU_FRPC'
-1) 安装/更新
-2) 启动/停止/重启
-3) 实例
-4) 接入码
-5) 代理配置
-6) XTCP
-7) 校验
-8) 查看
-9) 日志
-0) 返回
-MENU_FRPC
+  ui_menu_item 1 "安装/更新"
+  ui_menu_item 2 "服务管理" "启动 / 停止 / 重启 / 自启"
+  ui_menu_item 3 "实例" "多 frpc 客户端"
+  ui_menu_item 4 "接入码" "导入 frps 配对码"
+  ui_menu_item 5 "代理配置" "TCP / HTTP / STCP 等"
+  ui_menu_item 6 "XTCP" "打洞配置 / 导入码"
+  ui_menu_item 7 "配置" "查看 / 编辑 / 校验"
+  ui_menu_item 8 "日志"
+  ui_menu_back
 }
 
 frpc_management_menu() {
@@ -2668,9 +2785,8 @@ frpc_management_menu() {
       4) import_frps_pairing_code; pause ;;
       5) add_proxy_wizard; pause ;;
       6) xtcp_pair_menu ;;
-      7) verify_config "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"; pause ;;
-      8) show_config_file "$FRPC_CONFIG" "frpc 默认主配置" "true"; show_frpc_split_configs "true"; pause ;;
-      9) show_service_log frpc "200" "false"; pause ;;
+      7) frpc_config_menu ;;
+      8) show_service_log frpc "200" "false"; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -2679,16 +2795,14 @@ frpc_management_menu() {
 
 tools_menu() {
   while true; do
-    echo
-    info "工具/维护"
-    cat <<'MENU_TOOLS'
-1) 仅安装/更新 frp 二进制文件
-2) 校验全部配置
-3) 查看安装摘要
-4) 配置 GitHub 下载代理
-5) 卸载 frp
-0) 返回
-MENU_TOOLS
+    menu_title "工具/维护"
+    ui_menu_item 1 "仅安装/更新二进制"
+    ui_menu_item 2 "全局校验" "frps + frpc"
+    ui_menu_item 3 "安装摘要"
+    ui_menu_item 4 "GitHub 下载代理"
+    ui_menu_item 5 "修复文件日志"
+    ui_menu_item 6 "卸载 frp" "危险操作"
+    ui_menu_back
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
@@ -2696,7 +2810,8 @@ MENU_TOOLS
       2) verify_all_configs; pause ;;
       3) show_summary; pause ;;
       4) configure_github_proxy; pause ;;
-      5) uninstall_frp; pause ;;
+      5) fix_log_config_menu; pause ;;
+      6) uninstall_frp; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -2715,16 +2830,14 @@ manage_single_service_menu() {
     warn "请先安装/写入 ${svc}.service。"
     return 0
   fi
-  cat <<'MENU_SERVICE_ACTIONS'
-1) 状态
-2) 启动
-3) 停止
-4) 重启
-5) 日志
-6) 开机自启
-7) 取消自启
-0) 返回
-MENU_SERVICE_ACTIONS
+  ui_menu_item 1 "状态"
+  ui_menu_item 2 "启动"
+  ui_menu_item 3 "停止"
+  ui_menu_item 4 "重启"
+  ui_menu_item 5 "日志" "systemd"
+  ui_menu_item 6 "开机自启"
+  ui_menu_item 7 "取消自启"
+  ui_menu_back
   action="$(ask "请选择" "1")"
   case "$action" in
     1|status) service_action "$svc" status ;;
@@ -2809,18 +2922,18 @@ show_token_file() {
   fi
 }
 
-show_frpc_split_configs() {
-  local reveal="$1" files=() f
+show_frpc_split_configs_for_dir() {
+  local dir="$1" reveal="$2" files=() f
   echo
   echo "========== frpc 拆分代理配置 =========="
-  echo "目录：$FRPC_CONF_DIR"
-  if [[ ! -d "$FRPC_CONF_DIR" ]]; then
-    warn "目录不存在：$FRPC_CONF_DIR"
+  echo "目录：$dir"
+  if [[ ! -d "$dir" ]]; then
+    warn "目录不存在：$dir"
     return 0
   fi
-  mapfile -d '' -t files < <(find "$FRPC_CONF_DIR" -maxdepth 1 -type f -name '*.toml' -print0 2>/dev/null | sort -z)
+  mapfile -d '' -t files < <(find "$dir" -maxdepth 1 -type f -name '*.toml' -print0 2>/dev/null | sort -z)
   if (( ${#files[@]} == 0 )); then
-    warn "没有找到拆分代理配置：${FRPC_CONF_DIR}/*.toml"
+    warn "没有找到拆分代理配置：${dir}/*.toml"
     return 0
   fi
   for f in "${files[@]}"; do
@@ -2828,29 +2941,8 @@ show_frpc_split_configs() {
   done
 }
 
-show_current_configs() {
-  local choice reveal="true"
-  echo
-  info "查看当前配置"
-  warn "当前配置会直接显示 token / password / secretKey / GH_PROXY 等明文，请勿公开截图或粘贴。"
-  cat <<'MENU_CONFIG'
-1) 查看 frps.toml
-2) 查看 frpc.toml
-3) 查看 frpc.d 拆分代理配置
-4) 查看 token / installer.env
-5) 查看全部配置
-0) 返回
-MENU_CONFIG
-  choice="$(ask "请选择" "5")"
-  case "$choice" in
-    1|frps) show_config_file "$FRPS_CONFIG" "frps 主配置" "$reveal" ;;
-    2|frpc) show_config_file "$FRPC_CONFIG" "frpc 主配置" "$reveal" ;;
-    3|frpc.d|proxy|proxies) show_frpc_split_configs "$reveal" ;;
-    4|token|installer) show_token_file "$reveal"; show_config_file "$INSTALLER_CONFIG" "脚本配置 installer.env" "$reveal" ;;
-    5|all|全部) show_config_file "$FRPS_CONFIG" "frps 主配置" "$reveal"; show_config_file "$FRPC_CONFIG" "frpc 主配置" "$reveal"; show_frpc_split_configs "$reveal"; show_token_file "$reveal"; show_config_file "$INSTALLER_CONFIG" "脚本配置 installer.env" "$reveal" ;;
-    0|q|Q) return 0 ;;
-    *) warn "无效选择" ;;
-  esac
+show_frpc_split_configs() {
+  show_frpc_split_configs_for_dir "$FRPC_CONF_DIR" "$1"
 }
 
 choose_editor() {
@@ -2951,49 +3043,6 @@ choose_frpc_split_config() {
   fi
   warn "无效选择。"
   return 1
-}
-
-config_management_menu() {
-  while true; do
-    echo
-    info "配置管理"
-    cat <<'MENU_CONFIG_MANAGE'
-1) 编辑 frps 主配置
-2) 编辑默认 frpc 主配置
-3) 编辑默认 frpc.d 代理配置
-4) 编辑命名 frpc 实例主配置
-5) 编辑命名 frpc 实例代理配置
-0) 返回
-MENU_CONFIG_MANAGE
-    local choice name config dir
-    choice="$(ask "请选择" "1")"
-    case "$choice" in
-      1|frps) edit_config_file "$FRPS_CONFIG" "frps 主配置" "${INSTALL_DIR}/frps" "frps"; pause ;;
-      2|frpc) edit_config_file "$FRPC_CONFIG" "默认 frpc 主配置" "${INSTALL_DIR}/frpc" "frpc"; pause ;;
-      3|frpc.d)
-        choose_frpc_split_config "$FRPC_CONF_DIR" || { pause; continue; }
-        edit_config_file "$SELECTED_CONFIG_FILE" "默认 frpc 代理配置" "${INSTALL_DIR}/frpc" "frpc"
-        pause
-        ;;
-      4|instance-main)
-        name="$(ask_required "实例名" "")"
-        validate_instance_name "$name" || { warn "实例名不合法：$name"; pause; continue; }
-        config="$(instance_frpc_config "$name")"
-        edit_config_file "$config" "frpc 实例 ${name} 主配置" "${INSTALL_DIR}/frpc" "$(instance_service_name "$name")"
-        pause
-        ;;
-      5|instance-proxy)
-        name="$(ask_required "实例名" "")"
-        validate_instance_name "$name" || { warn "实例名不合法：$name"; pause; continue; }
-        dir="$(instance_frpc_conf_dir "$name")"
-        choose_frpc_split_config "$dir" || { pause; continue; }
-        edit_config_file "$SELECTED_CONFIG_FILE" "frpc 实例 ${name} 代理配置" "${INSTALL_DIR}/frpc" "$(instance_service_name "$name")"
-        pause
-        ;;
-      0|q|Q) return 0 ;;
-      *) warn "无效选择"; pause ;;
-    esac
-  done
 }
 
 show_log_file() {
@@ -3165,54 +3214,6 @@ MENU_FIX_LOGS
   fi
 }
 
-show_logs_menu() {
-  local choice lines follow
-  echo
-  info "查看日志"
-  lines="$(ask_port "显示最近多少行" "200")"
-  if confirm "是否实时跟踪日志" "n"; then
-    follow="true"
-    warn "实时跟踪模式下按 Ctrl+C 返回/退出。"
-  else
-    follow="false"
-  fi
-  cat <<'MENU_LOGS'
-1) frps 综合日志（推荐）
-2) frpc 综合日志（推荐）
-3) frps systemd 日志
-4) frpc systemd 日志
-5) frps 文件日志 /var/log/frp/frps.log
-6) frpc 文件日志 /var/log/frp/frpc.log
-7) 脚本安装/管理日志 /var/log/frp/installer.log
-8) 全部最近日志
-9) 一键修复/启用文件日志
-0) 返回
-MENU_LOGS
-  choice="$(ask "请选择" "1")"
-  case "$choice" in
-    1|frps|frps-all) show_service_log frps "$lines" "$follow" ;;
-    2|frpc|frpc-all) show_service_log frpc "$lines" "$follow" ;;
-    3|frps-journal) show_journal_log frps "$lines" "$follow" ;;
-    4|frpc-journal) show_journal_log frpc "$lines" "$follow" ;;
-    5|frps-file) show_log_file "${LOG_DIR}/frps.log" "frps 文件日志" "$lines" "$follow" ;;
-    6|frpc-file) show_log_file "${LOG_DIR}/frpc.log" "frpc 文件日志" "$lines" "$follow" ;;
-    7|installer) show_log_file "$INSTALLER_LOG" "脚本安装/管理日志" "$lines" "$follow" ;;
-    8|all|全部)
-      if [[ "$follow" == "true" ]]; then
-        warn "全部日志不支持同时实时跟踪，将显示最近 ${lines} 行。"
-      fi
-      show_service_log frps "$lines" "false"
-      show_service_log frpc "$lines" "false"
-      show_journal_log frps "$lines" "false"
-      show_journal_log frpc "$lines" "false"
-      show_log_file "$INSTALLER_LOG" "脚本安装/管理日志" "$lines" "false"
-      ;;
-    9|fix|repair) fix_log_config_menu ;;
-    0|q|Q) return 0 ;;
-    *) warn "无效选择" ;;
-  esac
-}
-
 uninstall_frp() {
   local instances=() instance service
   warn "即将卸载 frp。"
@@ -3240,14 +3241,10 @@ uninstall_frp() {
 }
 
 render_main_menu() {
-  cat <<'MENU_MAIN'
-1) 服务端
-2) 客户端
-3) 配置
-4) 日志
-5) 工具
-0) 退出
-MENU_MAIN
+  ui_menu_item 1 "服务端 frps" "安装 / 配置 / 接入码 / 日志"
+  ui_menu_item 2 "客户端 frpc" "实例 / 代理 / XTCP / 日志"
+  ui_menu_item 3 "工具/维护" "全局校验 / 摘要 / 日志修复 / 卸载"
+  ui_menu_back "退出"
 }
 
 main_menu() {
@@ -3261,9 +3258,7 @@ main_menu() {
     case "$choice" in
       1) frps_management_menu ;;
       2) frpc_management_menu ;;
-      3) config_management_menu ;;
-      4) show_logs_menu; pause ;;
-      5) tools_menu ;;
+      3) tools_menu ;;
       0|q|Q) exit 0 ;;
       *) warn "无效选择"; pause ;;
     esac
