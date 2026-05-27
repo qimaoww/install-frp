@@ -168,6 +168,7 @@ test_xtcp_import_code_helpers() {
   require_function write_xtcp_exposed_config
   require_function write_xtcp_visitor_config_from_payload
   require_function tune_xtcp_config_file
+  require_function render_xtcp_config_summary
   require_function xtcp_pair_menu
 
   local payload code decoded visitor_file exposed_file
@@ -232,6 +233,15 @@ EOF_OLD_XTCP_VISITOR
   assert_contains 'keepTunnelOpen = true' "$old_visitor_file" "xtcp repair enables keep tunnel open"
   assert_contains 'fallbackTimeoutMs = 5000' "$old_visitor_file" "xtcp repair raises fallback timeout"
   assert_contains '[visitors.natTraversal]' "$old_visitor_file" "xtcp repair adds visitor nat traversal"
+
+  local summary
+  summary="$(render_xtcp_config_summary "$old_visitor_file")"
+  assert_contains 'visitor p2p_ssh_visitor' <(printf '%s\n' "$summary") "xtcp summary shows visitor name"
+  assert_contains 'protocol=quic' <(printf '%s\n' "$summary") "xtcp summary shows protocol"
+  assert_contains 'keepTunnelOpen=true' <(printf '%s\n' "$summary") "xtcp summary shows keepTunnelOpen"
+  assert_contains 'disableAssistedAddrs=true' <(printf '%s\n' "$summary") "xtcp summary shows nat traversal"
+  declare -f run_cli | grep -Fq -- '--xtcp-summary' || fail "cli should expose xtcp summary"
+  declare -f run_cli | grep -Fq -- '--repair-xtcp-file' || fail "cli should expose xtcp repair"
 }
 
 test_frps_pairing_code_helpers() {

@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r11}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.27-r12}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -1593,6 +1593,83 @@ tune_xtcp_config_file() {
   chmod 640 "$file" 2>/dev/null || true
 }
 
+render_xtcp_config_summary() {
+  local file="$1"
+  [[ -f "$file" ]] || { warn "配置文件不存在：$file"; return 0; }
+  awk '
+    function trim(s) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      return s
+    }
+    function unquote(s) {
+      s = trim(s)
+      if (s ~ /^".*"$/) {
+        sub(/^"/, "", s)
+        sub(/"$/, "", s)
+      }
+      return s
+    }
+    function reset_block() {
+      kind = ""
+      name = ""
+      type = ""
+      protocol = ""
+      keep = ""
+      fallback_to = ""
+      fallback_timeout = ""
+      disable = ""
+      in_nat = 0
+    }
+    function flush_block() {
+      if (type != "xtcp") {
+        reset_block()
+        return
+      }
+      if (kind == "visitor") {
+        printf "visitor %s protocol=%s keepTunnelOpen=%s fallbackTo=%s fallbackTimeoutMs=%s disableAssistedAddrs=%s\n", \
+          name, (protocol ? protocol : "quic"), (keep ? keep : "false"), (fallback_to ? fallback_to : "-"), \
+          (fallback_timeout ? fallback_timeout : "-"), (disable ? disable : "false")
+      } else if (kind == "proxy") {
+        printf "proxy %s disableAssistedAddrs=%s\n", name, (disable ? disable : "false")
+      }
+      reset_block()
+    }
+    BEGIN { reset_block() }
+    /^[[:space:]]*\[\[visitors\]\][[:space:]]*$/ {
+      flush_block()
+      kind = "visitor"
+      next
+    }
+    /^[[:space:]]*\[\[proxies\]\][[:space:]]*$/ {
+      flush_block()
+      kind = "proxy"
+      next
+    }
+    /^[[:space:]]*\[(visitors|proxies)\.natTraversal\][[:space:]]*$/ {
+      in_nat = 1
+      next
+    }
+    /^[[:space:]]*\[/ {
+      in_nat = 0
+      next
+    }
+    {
+      pos = index($0, "=")
+      if (pos == 0) next
+      k = trim(substr($0, 1, pos - 1))
+      v = unquote(substr($0, pos + 1))
+      if (in_nat && k == "disableAssistedAddrs") disable = v
+      if (k == "name") name = v
+      else if (k == "type") type = v
+      else if (k == "protocol") protocol = v
+      else if (k == "keepTunnelOpen") keep = v
+      else if (k == "fallbackTo") fallback_to = v
+      else if (k == "fallbackTimeoutMs") fallback_timeout = v
+    }
+    END { flush_block() }
+  ' "$file"
+}
+
 select_frpc_split_dir_for_write() {
   local target name
   echo "写入目标：1) 默认 frpc  2) 命名 frpc 实例"
@@ -1711,8 +1788,15 @@ repair_xtcp_config_menu() {
   backup_file "$SELECTED_CONFIG_FILE" >/dev/null || true
   tune_xtcp_config_file "$SELECTED_CONFIG_FILE" "$protocol" "$disable_assisted" "$timeout" "true"
   verify_config "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"
+  render_xtcp_config_summary "$SELECTED_CONFIG_FILE"
   restart_service_if_present "$SELECTED_FRPC_SERVICE"
   ok "已修复 XTCP 配置：$SELECTED_CONFIG_FILE"
+}
+
+show_xtcp_config_summary_menu() {
+  select_frpc_split_dir_for_write || return 0
+  choose_frpc_split_config "$SELECTED_FRPC_SPLIT_DIR" || return 0
+  render_xtcp_config_summary "$SELECTED_CONFIG_FILE"
 }
 
 xtcp_pair_menu() {
@@ -1723,6 +1807,7 @@ xtcp_pair_menu() {
 1) 创建被访问端 XTCP 配置并生成加密导入码
 2) 粘贴加密导入码生成访问端配置
 3) 修复现有 XTCP 配置
+4) 查看 XTCP 配置摘要
 0) 返回
 MENU_XTCP_CODE
     local choice
@@ -1731,6 +1816,7 @@ MENU_XTCP_CODE
       1) create_xtcp_exposed_and_code; pause ;;
       2) import_xtcp_code_to_visitor; pause ;;
       3) repair_xtcp_config_menu; pause ;;
+      4) show_xtcp_config_summary_menu; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -3036,6 +3122,8 @@ print_usage() {
   bash frp.sh
   bash frp.sh --import-frps-code <接入码> <解密码>
   bash frp.sh --import-xtcp-code <导入码> <解密码>
+  bash frp.sh --xtcp-summary <配置文件>
+  bash frp.sh --repair-xtcp-file <配置文件> [quic|kcp] [fallbackTimeoutMs]
   bash frp.sh --service <frps|frpc|frpc@name> <status|start|stop|restart|enable|disable>
 EOF_USAGE
 }
@@ -3052,6 +3140,15 @@ run_cli() {
       need_root
       load_installer_config
       import_xtcp_code_to_visitor "${2:-}" "${3:-}"
+      ;;
+    --xtcp-summary)
+      render_xtcp_config_summary "${2:-}"
+      ;;
+    --repair-xtcp-file)
+      need_root
+      [[ -n "${2:-}" ]] || fatal "缺少 XTCP 配置文件路径。"
+      tune_xtcp_config_file "${2:-}" "${3:-quic}" "true" "${4:-5000}" "true"
+      render_xtcp_config_summary "${2:-}"
       ;;
     --service)
       need_root
