@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.28-r19}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.28-r20}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -1209,6 +1209,164 @@ configure_named_frpc_instance() {
 
   echo
   ok "frpc 实例 ${name} 配置完成：$config"
+  echo "代理拆分配置目录：$split_dir"
+}
+
+rewrite_frpc_config_for_instance() {
+  local config="$1" split_dir="$2" token_file="$3" log_file="$4" store_file="$5" tmp
+  tmp="$(mktemp)"
+  awk \
+    -v includes_line="includes = [\"$(toml_escape "$split_dir")/*.toml\"]" \
+    -v token_line="auth.tokenSource.file.path = \"$(toml_escape "$token_file")\"" \
+    -v log_line="log.to = \"$(toml_escape "$log_file")\"" \
+    -v store_line="path = \"$(toml_escape "$store_file")\"" \
+    -v store_dotted_line="store.path = \"$(toml_escape "$store_file")\"" '
+    function trim(s) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      return s
+    }
+    function key_of(line,    pos) {
+      pos = index(line, "=")
+      if (pos == 0) return ""
+      return trim(substr(line, 1, pos - 1))
+    }
+    function emit_missing_top() {
+      if (top_done) return
+      if (!includes_done) print includes_line
+      if (!token_done) print token_line
+      if (!log_done) print log_line
+      top_done = 1
+    }
+    function flush_store_path() {
+      if (section == "store" && !store_done) {
+        print store_line
+        store_done = 1
+      }
+    }
+    /^[[:space:]]*\[/ {
+      emit_missing_top()
+      flush_store_path()
+      section = ""
+      if ($0 ~ /^[[:space:]]*\[store\][[:space:]]*$/) {
+        section = "store"
+      }
+      print
+      next
+    }
+    {
+      k = key_of($0)
+      if (k == "includes") {
+        print includes_line
+        includes_done = 1
+        next
+      }
+      if (k == "auth.tokenSource.file.path") {
+        print token_line
+        token_done = 1
+        next
+      }
+      if (k == "log.to") {
+        print log_line
+        log_done = 1
+        next
+      }
+      if (section == "store" && k == "path") {
+        print store_line
+        store_done = 1
+        next
+      }
+      if (k == "store.path") {
+        print store_dotted_line
+        store_done = 1
+        next
+      }
+      print
+    }
+    END {
+      emit_missing_top()
+      flush_store_path()
+    }
+  ' "$config" > "$tmp"
+  mv "$tmp" "$config"
+}
+
+copy_default_frpc_to_instance() {
+  create_dirs_and_user
+  local name dir config split_dir token_file log_file store_file service copied=0
+
+  if [[ ! -f "$FRPC_CONFIG" ]]; then
+    warn "默认 frpc 主配置不存在：$FRPC_CONFIG"
+    warn "请先配置默认 frpc，或直接新建命名实例。"
+    return 0
+  fi
+
+  while true; do
+    name="$(ask_required "实例名，只能使用字母数字点号下划线短横线，例如 home" "")"
+    if validate_instance_name "$name"; then
+      break
+    fi
+    warn "实例名不合法，请使用 1-63 位字母、数字、点号、下划线或短横线，且以字母或数字开头。"
+  done
+
+  dir="$(instance_dir "$name")"
+  config="$(instance_frpc_config "$name")"
+  split_dir="$(instance_frpc_conf_dir "$name")"
+  token_file="$(instance_token_file "$name")"
+  log_file="$(instance_log_file "$name")"
+  store_file="${dir}/frpc-store.json"
+  service="$(instance_service_name "$name")"
+
+  if [[ -e "$config" || -d "$split_dir" ]]; then
+    if confirm "实例 ${name} 已存在，是否覆盖同名文件" "n"; then
+      [[ -f "$config" ]] && backup_file "$config" >/dev/null || true
+      [[ -f "$token_file" ]] && backup_file "$token_file" >/dev/null || true
+      [[ -f "$store_file" ]] && backup_file "$store_file" >/dev/null || true
+    else
+      warn "已取消复制。"
+      return 0
+    fi
+  fi
+
+  mkdir -p "$dir" "$split_dir" "${log_file%/*}"
+  cp -a "$FRPC_CONFIG" "$config"
+  rewrite_frpc_config_for_instance "$config" "$split_dir" "$token_file" "$log_file" "$store_file"
+
+  if [[ -f "$TOKEN_FILE" ]]; then
+    cp -a "$TOKEN_FILE" "$token_file"
+  else
+    warn "默认 token 文件不存在：$TOKEN_FILE；如果配置使用 tokenSource，请手动补齐 ${token_file}。"
+  fi
+
+  if [[ -f "$FRPC_STORE" ]]; then
+    cp -a "$FRPC_STORE" "$store_file"
+  fi
+
+  if [[ -d "$FRPC_CONF_DIR" ]]; then
+    while IFS= read -r -d '' file; do
+      cp -a "$file" "$split_dir/"
+      copied=1
+    done < <(find "$FRPC_CONF_DIR" -maxdepth 1 -type f -name '*.toml' -print0 2>/dev/null | sort -z)
+  fi
+  (( copied == 1 )) || warn "默认 frpc 拆分配置目录没有可复制的 TOML：${FRPC_CONF_DIR}/*.toml"
+
+  chown -R root:"$FRP_USER" "$dir" 2>/dev/null || true
+  chown "$FRP_USER":"$FRP_USER" "$log_file" 2>/dev/null || true
+  chmod 750 "$dir" "$split_dir" 2>/dev/null || true
+  chmod 640 "$config" "$token_file" "$store_file" 2>/dev/null || true
+
+  verify_config_before_restart "${INSTALL_DIR}/frpc" "$config" || return 0
+  write_frpc_template_service
+
+  if confirm "是否现在启动/重启 ${service}" "Y"; then
+    systemctl_enable_restart "$service"
+  fi
+
+  if service_exists frpc && confirm "是否停止并取消默认 frpc 自启，避免同一批代理重复连接" "n"; then
+    service_action frpc stop "false"
+    service_action frpc disable "false"
+  fi
+
+  ok "已从默认 frpc 复制为实例 ${name}：$config"
   echo "代理拆分配置目录：$split_dir"
 }
 
@@ -2831,16 +2989,18 @@ manage_frpc_instances_menu() {
     echo "实例目录：$FRPC_CLIENTS_DIR"
     ui_menu_item 1 "列出实例"
     ui_menu_item 2 "新建/重配实例"
-    ui_menu_item 3 "服务管理"
-    ui_menu_item 4 "删除实例" "危险操作"
+    ui_menu_item 3 "从默认 frpc 复制为实例"
+    ui_menu_item 4 "服务管理"
+    ui_menu_item 5 "删除实例" "危险操作"
     ui_menu_back
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
       1|list) render_frpc_instance_list; pause ;;
       2|create|configure) configure_named_frpc_instance; pause ;;
-      3|service) manage_named_frpc_service_action; pause ;;
-      4|delete|remove) delete_named_frpc_instance; pause ;;
+      3|copy|promote) copy_default_frpc_to_instance; pause ;;
+      4|service) manage_named_frpc_service_action; pause ;;
+      5|delete|remove) delete_named_frpc_instance; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac

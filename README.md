@@ -48,7 +48,7 @@ sudo bash frp.sh
 菜单顶部只显示运行概况；版本和配置细节在子菜单和安装摘要里查看：
 
 ```text
-frp 管理脚本 2026.05.28-r19
+frp 管理脚本 2026.05.28-r20
 状态：服务端:未运行 | 客户端:运行中 | 实例:2
 ```
 
@@ -141,6 +141,8 @@ includes = ["/etc/frp/frpc.d/*.toml"]
 /etc/frp/clients/<name>/token
 /var/log/frp/frpc-<name>.log
 ```
+
+已有默认 `frpc` 时，可以在 `客户端 frpc -> 实例 -> 从默认 frpc 复制为实例` 直接生成 `frpc@<name>`。脚本会复制默认主配置、`frpc.d/*.toml`、token 和 store 文件，并把 `includes`、`auth.tokenSource.file.path`、`log.to`、`store.path` 改成实例自己的路径。
 
 systemd 使用模板服务：
 

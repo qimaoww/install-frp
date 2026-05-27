@@ -127,6 +127,7 @@ test_named_instance_lifecycle_helpers() {
   require_function render_frpc_template_service
   require_function write_frpc_template_service
   require_function configure_named_frpc_instance
+  require_function copy_default_frpc_to_instance
   require_function frps_management_menu
   require_function manage_frpc_instances_menu
   require_function frpc_management_menu
@@ -158,6 +159,66 @@ test_named_instance_lifecycle_helpers() {
   render_frpc_template_service > "$service_path"
   assert_contains 'Description=frp client instance %i service' "$service_path" "template description"
   assert_contains 'ExecStart='"${INSTALL_DIR}"'/frpc -c '"${FRPC_CLIENTS_DIR}"'/%i/frpc.toml' "$service_path" "template execstart"
+
+  local migrate_root="${TMP_DIR}/copy-default" copy_output instance_config instance_split instance_token instance_store instance_log
+  migrate_root="${TMP_DIR}/copy-default"
+  instance_config="${migrate_root}/etc/frp/clients/home/frpc.toml"
+  instance_split="${migrate_root}/etc/frp/clients/home/frpc.d"
+  instance_token="${migrate_root}/etc/frp/clients/home/token"
+  instance_store="${migrate_root}/etc/frp/clients/home/frpc-store.json"
+  instance_log="${migrate_root}/var/log/frp/frpc-home.log"
+  copy_output="$(
+    (
+      INSTALL_DIR="${migrate_root}/usr/local/bin"
+      CONFIG_DIR="${migrate_root}/etc/frp"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${migrate_root}/var/log/frp"
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      FRPC_STORE="${CONFIG_DIR}/frpc-store.json"
+      mkdir -p "$INSTALL_DIR" "$FRPC_CONF_DIR" "$PRESET_DIR" "$LOG_DIR"
+      : > "${INSTALL_DIR}/frpc"
+      chmod +x "${INSTALL_DIR}/frpc"
+      cat > "$FRPC_CONFIG" <<EOF_DEFAULT_FRPC
+serverAddr = "frps.example.com"
+serverPort = 7000
+includes = ["${CONFIG_DIR}/frpc.d/*.toml"]
+auth.method = "token"
+auth.tokenSource.type = "file"
+auth.tokenSource.file.path = "${CONFIG_DIR}/token"
+log.to = "${LOG_DIR}/frpc.log"
+[store]
+path = "${CONFIG_DIR}/frpc-store.json"
+EOF_DEFAULT_FRPC
+      printf 'secret-token\n' > "$TOKEN_FILE"
+      printf '{"proxies":[]}\n' > "$FRPC_STORE"
+      printf '[[proxies]]\nname = "ssh"\ntype = "tcp"\nlocalPort = 22\nremotePort = 6000\n' > "${FRPC_CONF_DIR}/ssh.toml"
+      ask_required() { printf 'home'; }
+      confirm() { [[ "$1" == 是否现在启动* ]]; }
+      verify_config() { printf 'verify:%s\n' "$2"; return 0; }
+      write_frpc_template_service() { printf 'template-service\n'; }
+      systemctl_enable_restart() { printf 'enable-restart:%s\n' "$1"; }
+      service_exists() { return 0; }
+      service_action() { printf 'service:%s:%s\n' "$1" "$2"; }
+      copy_default_frpc_to_instance
+    ) 2>&1
+  )"
+  assert_contains "verify:${instance_config}" <(printf '%s\n' "$copy_output") "copy default frpc verifies named instance"
+  assert_contains 'template-service' <(printf '%s\n' "$copy_output") "copy default frpc writes instance template service"
+  assert_contains 'enable-restart:frpc@home' <(printf '%s\n' "$copy_output") "copy default frpc starts named instance"
+  assert_contains 'serverAddr = "frps.example.com"' "$instance_config" "copy default frpc keeps server address"
+  assert_contains 'includes = ["'"${instance_split}"'/*.toml"]' "$instance_config" "copy default frpc rewrites includes"
+  assert_contains 'auth.tokenSource.file.path = "'"${instance_token}"'"' "$instance_config" "copy default frpc rewrites token path"
+  assert_contains 'log.to = "'"${instance_log}"'"' "$instance_config" "copy default frpc rewrites log path"
+  assert_contains 'path = "'"${instance_store}"'"' "$instance_config" "copy default frpc rewrites store path"
+  assert_contains 'secret-token' "$instance_token" "copy default frpc copies token file"
+  assert_contains 'name = "ssh"' "${instance_split}/ssh.toml" "copy default frpc copies split proxy config"
+
+  local instance_menu
+  instance_menu="$(declare -f manage_frpc_instances_menu)"
+  assert_contains '从默认 frpc 复制为实例' <(printf '%s\n' "$instance_menu") "instance menu exposes copy default action"
 }
 
 test_config_edit_helpers() {
