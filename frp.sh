@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r30}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r32}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -316,7 +316,7 @@ render_one_click_import_command() {
 
 print_encrypted_import_code() {
   local kind="$1" title="$2" code="$3" passphrase="$4"
-  warn "下面的导入码和口令合在一起等同于 secretKey，请勿公开。"
+  warn "下面的导入码和口令合在一起等同于 frps token 与 secretKey，请勿公开。"
   echo
   echo "========== ${title} 加密导入码 =========="
   echo "$code"
@@ -2201,8 +2201,19 @@ EOF_VISITOR
 render_stcp_payload() {
   local proxy_name="$1" visitor_name="$2" secret="$3" bind_addr="$4" bind_port="$5"
   local server_user="${6:-}" allow_users="${7:-}"
+  local server_addr="${8:-}" server_port="${9:-}" token="${10:-}"
+  local transport_protocol="${11:-tcp}" tls_enable="${12:-true}" pool_count="${13:-0}"
+  local dns_server="${14:-}" user_name="${15:-}"
   cat <<EOF_STCP_PAYLOAD
 format = "install-frp-stcp-v1"
+serverAddr = "$(toml_escape "$server_addr")"
+serverPort = ${server_port}
+token = "$(toml_escape "$token")"
+transportProtocol = "$(toml_escape "$transport_protocol")"
+tlsEnable = ${tls_enable}
+poolCount = ${pool_count}
+dnsServer = "$(toml_escape "$dns_server")"
+userName = "$(toml_escape "$user_name")"
 proxyName = "$(toml_escape "$proxy_name")"
 visitorName = "$(toml_escape "$visitor_name")"
 secretKey = "$(toml_escape "$secret")"
@@ -2268,10 +2279,18 @@ render_xtcp_payload() {
   local fallback_proxy_name="${10}" fallback_visitor_name="${11}" fallback_timeout_ms="${12}"
   local protocol="${13:-quic}" disable_assisted_addrs="${14:-false}"
   local server_user="${15:-}" allow_users="${16:-}"
+  local token="${17:-}" transport_protocol="${18:-tcp}" tls_enable="${19:-true}"
+  local pool_count="${20:-0}" dns_server="${21:-}" user_name="${22:-}"
   cat <<EOF_XTCP_PAYLOAD
 format = "install-frp-xtcp-v1"
 serverAddr = "$(toml_escape "$server_addr")"
 serverPort = ${server_port}
+token = "$(toml_escape "$token")"
+transportProtocol = "$(toml_escape "$transport_protocol")"
+tlsEnable = ${tls_enable}
+poolCount = ${pool_count}
+dnsServer = "$(toml_escape "$dns_server")"
+userName = "$(toml_escape "$user_name")"
 proxyName = "$(toml_escape "$proxy_name")"
 visitorName = "$(toml_escape "$visitor_name")"
 secretKey = "$(toml_escape "$secret")"
@@ -2660,7 +2679,7 @@ repair_xtcp_path() {
 }
 
 select_frpc_split_dir_for_write() {
-  local target="${1:-}" strict="${2:-false}" name config
+  local target="${1:-}" strict="${2:-false}" allow_missing_config="${3:-false}" name config
   if [[ -z "$target" ]]; then
     if [[ "$strict" == "true" && ! -t 0 ]]; then
       warn "非交互导入必须指定目标：default 或 client:<name>。"
@@ -2697,7 +2716,7 @@ select_frpc_split_dir_for_write() {
       name="${target#*:}"
       validate_instance_name "$name" || { warn "客户端名不合法：$name"; return 1; }
       config="$(instance_frpc_config "$name")"
-      if [[ ! -f "$config" ]]; then
+      if [[ ! -f "$config" && "$allow_missing_config" != "true" ]]; then
         warn "客户端主配置不存在：$config"
         return 1
       fi
@@ -2742,11 +2761,153 @@ selected_frpc_target_spec() {
   esac
 }
 
+selected_frpc_client_name() {
+  local service="${SELECTED_FRPC_SERVICE:-frpc}" name
+  case "$service" in
+    frpc|"") return 1 ;;
+    frpc@*)
+      name="${service#frpc@}"
+      validate_instance_name "$name" || return 1
+      printf '%s' "$name"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+selected_frpc_token_file() {
+  local name
+  if name="$(selected_frpc_client_name 2>/dev/null)"; then
+    instance_token_file "$name"
+  else
+    printf '%s' "$TOKEN_FILE"
+  fi
+}
+
+selected_frpc_log_file() {
+  local name
+  if name="$(selected_frpc_client_name 2>/dev/null)"; then
+    instance_log_file "$name"
+  else
+    printf '%s/frpc.log' "$LOG_DIR"
+  fi
+}
+
+selected_frpc_store_file() {
+  local name
+  if name="$(selected_frpc_client_name 2>/dev/null)"; then
+    printf '%s/frpc-store.json' "$(instance_dir "$name")"
+  else
+    printf '%s' "$FRPC_STORE"
+  fi
+}
+
+read_frpc_config_token() {
+  local config="$1" fallback_token_file="$2" token_path token
+  token_path="$(read_toml_value "$config" "auth.tokenSource.file.path")"
+  if [[ -n "$token_path" && -s "$token_path" ]]; then
+    tr -d '[:space:]' < "$token_path"
+    return 0
+  fi
+  if [[ -s "$fallback_token_file" ]]; then
+    tr -d '[:space:]' < "$fallback_token_file"
+    return 0
+  fi
+  token="$(read_toml_value "$config" "auth.token")"
+  [[ -n "$token" ]] || token="$(read_toml_value "$config" "token")"
+  printf '%s' "$token"
+}
+
+load_selected_frpc_bootstrap_fields() {
+  local server_addr_override="${1:-}" server_port_override="${2:-}" token_file
+  token_file="$(selected_frpc_token_file)"
+
+  FRPC_BOOTSTRAP_SERVER_ADDR="${server_addr_override:-$(read_toml_value "$SELECTED_FRPC_CONFIG" "serverAddr")}"
+  FRPC_BOOTSTRAP_SERVER_PORT="${server_port_override:-$(read_toml_value "$SELECTED_FRPC_CONFIG" "serverPort")}"
+  FRPC_BOOTSTRAP_TOKEN="$(read_frpc_config_token "$SELECTED_FRPC_CONFIG" "$token_file")"
+  FRPC_BOOTSTRAP_TRANSPORT_PROTOCOL="$(read_toml_value "$SELECTED_FRPC_CONFIG" "transport.protocol")"
+  FRPC_BOOTSTRAP_TLS_ENABLE="$(read_toml_value "$SELECTED_FRPC_CONFIG" "transport.tls.enable")"
+  FRPC_BOOTSTRAP_POOL_COUNT="$(read_toml_value "$SELECTED_FRPC_CONFIG" "transport.poolCount")"
+  FRPC_BOOTSTRAP_DNS_SERVER="$(read_toml_value "$SELECTED_FRPC_CONFIG" "dnsServer")"
+  FRPC_BOOTSTRAP_USER_NAME="$(read_toml_value "$SELECTED_FRPC_CONFIG" "user")"
+
+  [[ -n "$FRPC_BOOTSTRAP_SERVER_ADDR" ]] || FRPC_BOOTSTRAP_SERVER_ADDR="$(ask_required "访问端连接的 frps 地址/IP/域名" "")"
+  [[ -n "$FRPC_BOOTSTRAP_SERVER_PORT" ]] || FRPC_BOOTSTRAP_SERVER_PORT="$(ask_port "访问端连接的 frps 端口" "7000")"
+  [[ -n "$FRPC_BOOTSTRAP_TOKEN" ]] || FRPC_BOOTSTRAP_TOKEN="$(ask_required "frps 鉴权 token；会写入加密接入码" "")"
+  [[ -n "$FRPC_BOOTSTRAP_TRANSPORT_PROTOCOL" ]] || FRPC_BOOTSTRAP_TRANSPORT_PROTOCOL="tcp"
+  case "$FRPC_BOOTSTRAP_TRANSPORT_PROTOCOL" in tcp|kcp|quic|websocket|wss) ;; *) FRPC_BOOTSTRAP_TRANSPORT_PROTOCOL="tcp" ;; esac
+  [[ "$FRPC_BOOTSTRAP_TLS_ENABLE" == "true" || "$FRPC_BOOTSTRAP_TLS_ENABLE" == "false" ]] || FRPC_BOOTSTRAP_TLS_ENABLE="true"
+  [[ "$FRPC_BOOTSTRAP_POOL_COUNT" =~ ^[0-9]+$ ]] || FRPC_BOOTSTRAP_POOL_COUNT="0"
+}
+
+write_frpc_service_for_target() {
+  local service="${1:-frpc}" config="${2:-$FRPC_CONFIG}"
+  case "$service" in
+    frpc|"")
+      write_systemd_service "frpc" "${INSTALL_DIR}/frpc" "$config"
+      ;;
+    frpc@*)
+      write_frpc_template_service
+      ;;
+  esac
+}
+
+bootstrap_selected_frpc_from_payload_if_needed() {
+  local payload="$1" title="$2"
+  local server_addr server_port token proto tls_enable pool_count dns_server user_name
+  local token_file log_file store_file
+  [[ -s "$SELECTED_FRPC_CONFIG" ]] && return 0
+
+  server_addr="$(parse_payload_value "$payload" "serverAddr")"
+  server_port="$(parse_payload_value "$payload" "serverPort")"
+  token="$(parse_payload_value "$payload" "token")"
+  if [[ -z "$server_addr" || -z "$server_port" || -z "$token" ]]; then
+    warn "${title} 导入码缺少 frps serverAddr/serverPort/token，不能在空机器生成 frpc.toml。"
+    warn "请重新导出新版 ${title} 接入码，或先导入 frps 接入码。"
+    return 1
+  fi
+
+  proto="$(parse_payload_value "$payload" "transportProtocol")"
+  tls_enable="$(parse_payload_value "$payload" "tlsEnable")"
+  pool_count="$(parse_payload_value "$payload" "poolCount")"
+  dns_server="$(parse_payload_value "$payload" "dnsServer")"
+  user_name="$(parse_payload_value "$payload" "userName")"
+  [[ -n "$proto" ]] || proto="tcp"
+  case "$proto" in tcp|kcp|quic|websocket|wss) ;; *) proto="tcp" ;; esac
+  [[ "$tls_enable" == "true" || "$tls_enable" == "false" ]] || tls_enable="true"
+  [[ "$pool_count" =~ ^[0-9]+$ ]] || pool_count="0"
+
+  token_file="$(selected_frpc_token_file)"
+  log_file="$(selected_frpc_log_file)"
+  store_file="$(selected_frpc_store_file)"
+  write_token_file "$token_file" "$token"
+  write_frpc_base_config \
+    "$SELECTED_FRPC_CONFIG" \
+    "$SELECTED_FRPC_SPLIT_DIR" \
+    "$token_file" \
+    "$log_file" \
+    "$server_addr" \
+    "$server_port" \
+    "$user_name" \
+    "$proto" \
+    "$tls_enable" \
+    "$pool_count" \
+    "$dns_server" \
+    "" \
+    "" \
+    "" \
+    "" \
+    "$store_file" \
+    "false"
+  write_frpc_service_for_target "$SELECTED_FRPC_SERVICE" "$SELECTED_FRPC_CONFIG"
+  ok "已根据 ${title} 导入码生成 frpc 主配置：$SELECTED_FRPC_CONFIG"
+}
+
 create_stcp_exposed_and_code() {
   create_dirs_and_user
   local target_spec="${1:-}"
   local name secret local_ip local_port bind_addr bind_port server_user allow_users passphrase payload code safe_name file
   select_frpc_split_dir_for_write "$target_spec" || return 0
+  load_selected_frpc_bootstrap_fields
   name="$(ask_required "STCP 配置名 proxyName" "secret_ssh")"
   secret="$(ask "secretKey，留空随机生成" "")"
   [[ -z "$secret" ]] && secret="$(random_secret)"
@@ -2754,7 +2915,7 @@ create_stcp_exposed_and_code() {
   local_port="$(ask_port "被访问本地服务端口 localPort" "22")"
   bind_addr="$(ask "访问端本地监听地址 bindAddr" "127.0.0.1")"
   bind_port="$(ask_port "访问端本地监听端口 bindPort" "6000")"
-  server_user="$(ask "被访问端 frpc user serverUser，留空默认同访问端 user" "")"
+  server_user="$(ask "被访问端 frpc user serverUser，留空默认同访问端 user" "$FRPC_BOOTSTRAP_USER_NAME")"
   allow_users="$(ask "allowUsers，留空默认只允许同 user；允许所有填 *" "")"
 
   safe_name="$(safe_filename "$name")"
@@ -2770,7 +2931,7 @@ create_stcp_exposed_and_code() {
   write_stcp_exposed_config "$file" "$name" "$secret" "$local_ip" "$local_port" "$allow_users"
   verify_config_before_restart "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG" || return 0
 
-  payload="$(render_stcp_payload "$name" "${name}_visitor" "$secret" "$bind_addr" "$bind_port" "$server_user" "$allow_users")"
+  payload="$(render_stcp_payload "$name" "${name}_visitor" "$secret" "$bind_addr" "$bind_port" "$server_user" "$allow_users" "$FRPC_BOOTSTRAP_SERVER_ADDR" "$FRPC_BOOTSTRAP_SERVER_PORT" "$FRPC_BOOTSTRAP_TOKEN" "$FRPC_BOOTSTRAP_TRANSPORT_PROTOCOL" "$FRPC_BOOTSTRAP_TLS_ENABLE" "$FRPC_BOOTSTRAP_POOL_COUNT" "$FRPC_BOOTSTRAP_DNS_SERVER" "$FRPC_BOOTSTRAP_USER_NAME")"
   passphrase="$(ask "导入码加密口令，留空随机生成" "")"
   [[ -z "$passphrase" ]] && passphrase="$(random_secret | cut -c1-20)"
   code="$(encrypt_payload_code "IFRP-STCP-V1" "$passphrase" "$payload")"
@@ -2786,7 +2947,7 @@ import_stcp_code_to_visitor() {
   passphrase="${2:-}"
   strict_verify="${3:-false}"
   target_spec="${4:-}"
-  if ! select_frpc_split_dir_for_write "$target_spec" "$strict_verify"; then
+  if ! select_frpc_split_dir_for_write "$target_spec" "$strict_verify" "true"; then
     [[ "$strict_verify" == "true" ]] && return 1
     return 0
   fi
@@ -2813,6 +2974,10 @@ import_stcp_code_to_visitor() {
       return 0
     fi
   fi
+  if ! bootstrap_selected_frpc_from_payload_if_needed "$payload" "STCP"; then
+    [[ "$strict_verify" == "true" ]] && return 1
+    return 0
+  fi
   write_stcp_visitor_config_from_payload "$file" "$payload"
   verify_status=0
   verify_config_before_restart "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG" || verify_status=$?
@@ -2838,15 +3003,16 @@ export_stcp_code_from_existing() {
     warn "该 STCP 配置缺少 secretKey，不能导出接入码：$file"
     return 0
   fi
+  load_selected_frpc_bootstrap_fields
   allow_users_raw="$(extract_proxy_field "$file" stcp "$name" allowUsers)"
   allow_users="$(normalize_toml_array_csv "$allow_users_raw")"
   visitor_name="$(ask "访问端配置名 visitorName" "${name}_visitor")"
   bind_addr="$(ask "访问端本地监听地址 bindAddr" "127.0.0.1")"
   bind_port="$(ask_port "访问端本地监听端口 bindPort" "6000")"
-  server_user="$(ask "被访问端 frpc user serverUser，留空默认同访问端 user" "$(read_toml_value "$SELECTED_FRPC_CONFIG" "user")")"
+  server_user="$(ask "被访问端 frpc user serverUser，留空默认同访问端 user" "$FRPC_BOOTSTRAP_USER_NAME")"
   passphrase="$(ask "导入码加密口令，留空随机生成" "")"
   [[ -z "$passphrase" ]] && passphrase="$(random_secret | cut -c1-20)"
-  payload="$(render_stcp_payload "$name" "$visitor_name" "$secret" "$bind_addr" "$bind_port" "$server_user" "$allow_users")"
+  payload="$(render_stcp_payload "$name" "$visitor_name" "$secret" "$bind_addr" "$bind_port" "$server_user" "$allow_users" "$FRPC_BOOTSTRAP_SERVER_ADDR" "$FRPC_BOOTSTRAP_SERVER_PORT" "$FRPC_BOOTSTRAP_TOKEN" "$FRPC_BOOTSTRAP_TRANSPORT_PROTOCOL" "$FRPC_BOOTSTRAP_TLS_ENABLE" "$FRPC_BOOTSTRAP_POOL_COUNT" "$FRPC_BOOTSTRAP_DNS_SERVER" "$FRPC_BOOTSTRAP_USER_NAME")"
   code="$(encrypt_payload_code "IFRP-STCP-V1" "$passphrase" "$payload")"
 
   echo "来源：$file"
@@ -2880,8 +3046,11 @@ create_xtcp_exposed_and_code() {
   local server_addr server_port name secret local_ip local_port bind_addr bind_port keep_open fallback
   local fallback_proxy fallback_visitor timeout protocol disable_assisted server_user allow_users passphrase payload code safe_name file
   select_frpc_split_dir_for_write "$target_spec" || return 0
-  server_addr="$(ask_required "导入端连接的 frps 地址/IP/域名" "")"
-  server_port="$(ask_port "导入端连接的 frps 端口" "7000")"
+  load_selected_frpc_bootstrap_fields
+  server_addr="$(ask_required "访问端连接的 frps 地址/IP/域名" "$FRPC_BOOTSTRAP_SERVER_ADDR")"
+  server_port="$(ask_port "访问端连接的 frps 端口" "$FRPC_BOOTSTRAP_SERVER_PORT")"
+  FRPC_BOOTSTRAP_SERVER_ADDR="$server_addr"
+  FRPC_BOOTSTRAP_SERVER_PORT="$server_port"
   name="$(ask_required "XTCP 配置名 proxyName" "p2p_ssh")"
   secret="$(ask "secretKey，留空随机生成" "")"
   [[ -z "$secret" ]] && secret="$(random_secret)"
@@ -2891,7 +3060,7 @@ create_xtcp_exposed_and_code() {
   bind_port="$(ask_port "访问端本地监听端口 bindPort" "6000")"
   protocol="$(ask "访问端 XTCP 底层协议 quic/kcp" "quic")"
   case "$protocol" in quic|kcp) ;; *) warn "未知协议，回退 quic"; protocol="quic" ;; esac
-  server_user="$(ask "被访问端 frpc user serverUser，留空默认同访问端 user" "")"
+  server_user="$(ask "被访问端 frpc user serverUser，留空默认同访问端 user" "$FRPC_BOOTSTRAP_USER_NAME")"
   allow_users="$(ask "allowUsers，留空默认只允许同 user；允许所有填 *" "")"
   disable_assisted="$(ask_yes_no_value "禁用辅助地址；有 Docker/VPN/100.64 地址干扰时建议启用" "n")"
   keep_open="$(ask_yes_no_value "访问端是否 keepTunnelOpen" "Y")"
@@ -2914,7 +3083,7 @@ create_xtcp_exposed_and_code() {
   write_xtcp_exposed_config "$file" "$name" "$secret" "$local_ip" "$local_port" "$fallback" "$fallback_proxy" "$disable_assisted" "$allow_users"
   verify_config_before_restart "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG" || return 0
 
-  payload="$(render_xtcp_payload "$server_addr" "$server_port" "$name" "${name}_visitor" "$secret" "$bind_addr" "$bind_port" "$keep_open" "$fallback" "$fallback_proxy" "$fallback_visitor" "$timeout" "$protocol" "$disable_assisted" "$server_user" "$allow_users")"
+  payload="$(render_xtcp_payload "$server_addr" "$server_port" "$name" "${name}_visitor" "$secret" "$bind_addr" "$bind_port" "$keep_open" "$fallback" "$fallback_proxy" "$fallback_visitor" "$timeout" "$protocol" "$disable_assisted" "$server_user" "$allow_users" "$FRPC_BOOTSTRAP_TOKEN" "$FRPC_BOOTSTRAP_TRANSPORT_PROTOCOL" "$FRPC_BOOTSTRAP_TLS_ENABLE" "$FRPC_BOOTSTRAP_POOL_COUNT" "$FRPC_BOOTSTRAP_DNS_SERVER" "$FRPC_BOOTSTRAP_USER_NAME")"
   passphrase="$(ask "导入码加密口令，留空随机生成" "")"
   [[ -z "$passphrase" ]] && passphrase="$(random_secret | cut -c1-20)"
   code="$(encrypt_payload_code "IFRP-XTCP-V1" "$passphrase" "$payload")"
@@ -2930,7 +3099,7 @@ import_xtcp_code_to_visitor() {
   passphrase="${2:-}"
   strict_verify="${3:-false}"
   target_spec="${4:-}"
-  if ! select_frpc_split_dir_for_write "$target_spec" "$strict_verify"; then
+  if ! select_frpc_split_dir_for_write "$target_spec" "$strict_verify" "true"; then
     [[ "$strict_verify" == "true" ]] && return 1
     return 0
   fi
@@ -2956,6 +3125,10 @@ import_xtcp_code_to_visitor() {
       [[ "$strict_verify" == "true" ]] && return 1
       return 0
     fi
+  fi
+  if ! bootstrap_selected_frpc_from_payload_if_needed "$payload" "XTCP"; then
+    [[ "$strict_verify" == "true" ]] && return 1
+    return 0
   fi
   write_xtcp_visitor_config_from_payload "$file" "$payload"
   verify_status=0
@@ -2985,11 +3158,14 @@ export_xtcp_code_from_existing() {
     return 0
   fi
 
-  default_server_addr="$(read_toml_value "$SELECTED_FRPC_CONFIG" "serverAddr")"
-  default_server_port="$(read_toml_value "$SELECTED_FRPC_CONFIG" "serverPort")"
+  load_selected_frpc_bootstrap_fields
+  default_server_addr="$FRPC_BOOTSTRAP_SERVER_ADDR"
+  default_server_port="$FRPC_BOOTSTRAP_SERVER_PORT"
   [[ -n "$default_server_port" ]] || default_server_port="7000"
   server_addr="$(ask_required "访问端连接的 frps 地址/IP/域名" "$default_server_addr")"
   server_port="$(ask_port "访问端连接的 frps 端口" "$default_server_port")"
+  FRPC_BOOTSTRAP_SERVER_ADDR="$server_addr"
+  FRPC_BOOTSTRAP_SERVER_PORT="$server_port"
   visitor_name="$(ask "访问端配置名 visitorName" "${name}_visitor")"
   bind_addr="$(ask "访问端本地监听地址 bindAddr" "127.0.0.1")"
   bind_port="$(ask_port "访问端本地监听端口 bindPort" "6000")"
@@ -3002,7 +3178,7 @@ export_xtcp_code_from_existing() {
   [[ "$disable_assisted" == "true" ]] || disable_assisted="false"
   allow_users_raw="$(extract_proxy_field "$file" xtcp "$name" allowUsers)"
   allow_users="$(normalize_toml_array_csv "$allow_users_raw")"
-  server_user="$(ask "被访问端 frpc user serverUser，留空默认同访问端 user" "$(read_toml_value "$SELECTED_FRPC_CONFIG" "user")")"
+  server_user="$(ask "被访问端 frpc user serverUser，留空默认同访问端 user" "$FRPC_BOOTSTRAP_USER_NAME")"
 
   fallback="false"
   fallback_proxy="${name}_stcp"
@@ -3021,7 +3197,7 @@ export_xtcp_code_from_existing() {
 
   passphrase="$(ask "导入码加密口令，留空随机生成" "")"
   [[ -z "$passphrase" ]] && passphrase="$(random_secret | cut -c1-20)"
-  payload="$(render_xtcp_payload "$server_addr" "$server_port" "$name" "$visitor_name" "$secret" "$bind_addr" "$bind_port" "$keep_open" "$fallback" "$fallback_proxy" "$fallback_visitor" "$timeout" "$protocol" "$disable_assisted" "$server_user" "$allow_users")"
+  payload="$(render_xtcp_payload "$server_addr" "$server_port" "$name" "$visitor_name" "$secret" "$bind_addr" "$bind_port" "$keep_open" "$fallback" "$fallback_proxy" "$fallback_visitor" "$timeout" "$protocol" "$disable_assisted" "$server_user" "$allow_users" "$FRPC_BOOTSTRAP_TOKEN" "$FRPC_BOOTSTRAP_TRANSPORT_PROTOCOL" "$FRPC_BOOTSTRAP_TLS_ENABLE" "$FRPC_BOOTSTRAP_POOL_COUNT" "$FRPC_BOOTSTRAP_DNS_SERVER" "$FRPC_BOOTSTRAP_USER_NAME")"
   code="$(encrypt_payload_code "IFRP-XTCP-V1" "$passphrase" "$payload")"
 
   echo "来源：$file"
@@ -3761,7 +3937,6 @@ import_frps_pairing_code() {
       log_file="$(instance_log_file "$name")"
       store_file="$(instance_dir "$name")/frpc-store.json"
       service="$(instance_service_name "$name")"
-      write_frpc_template_service
       ;;
     client:*|instance:*)
       name="${target#*:}"
@@ -3772,7 +3947,6 @@ import_frps_pairing_code() {
       log_file="$(instance_log_file "$name")"
       store_file="$(instance_dir "$name")/frpc-store.json"
       service="$(instance_service_name "$name")"
-      write_frpc_template_service
       ;;
     *) warn "无效选择"; [[ "$strict_verify" == "true" ]] && return 1; return 0 ;;
   esac
@@ -3788,6 +3962,7 @@ import_frps_pairing_code() {
   fi
 
   write_frpc_config_from_pairing_payload "$config" "$split_dir" "$token_file" "$log_file" "$store_file" "$payload"
+  write_frpc_service_for_target "$service" "$config"
   verify_status=0
   verify_config_before_restart "${INSTALL_DIR}/frpc" "$config" || verify_status=$?
   if (( verify_status != 0 )); then
@@ -3976,24 +4151,34 @@ frpc_config_target_menu_direct() {
     echo "拆分目录：$SELECTED_FRPC_SPLIT_DIR"
     ui_menu_item 1 "查看配置"
     ui_menu_item 2 "新增配置"
-    ui_menu_item 3 "编辑主配置"
-    ui_menu_item 4 "编辑拆分配置"
-    ui_menu_item 5 "删除拆分配置"
-    ui_menu_item 6 "校验配置"
+    ui_menu_item 3 "STCP 接入码"
+    ui_menu_item 4 "XTCP 接入码"
+    ui_menu_item 5 "编辑主配置"
+    ui_menu_item 6 "编辑拆分配置"
+    ui_menu_item 7 "删除拆分配置"
+    ui_menu_item 8 "校验配置"
     ui_menu_back
-    local choice
+    local choice target_spec
     choice="$(ask "请选择" "1")"
     case "$choice" in
       1|view) show_config_file "$SELECTED_FRPC_CONFIG" "${SELECTED_FRPC_LABEL} 主配置" "true"; show_frpc_split_configs_for_dir "$SELECTED_FRPC_SPLIT_DIR" "true"; pause ;;
       2|add) add_proxy_wizard "true" ;;
-      3|edit-main) edit_config_file "$SELECTED_FRPC_CONFIG" "${SELECTED_FRPC_LABEL} 主配置" "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_SERVICE"; pause ;;
-      4|edit-split)
+      3|stcp)
+        target_spec="$(selected_frpc_target_spec)" || { pause; continue; }
+        stcp_pair_menu "$target_spec"
+        ;;
+      4|xtcp)
+        target_spec="$(selected_frpc_target_spec)" || { pause; continue; }
+        xtcp_pair_menu "$target_spec"
+        ;;
+      5|edit-main) edit_config_file "$SELECTED_FRPC_CONFIG" "${SELECTED_FRPC_LABEL} 主配置" "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_SERVICE"; pause ;;
+      6|edit-split)
         choose_frpc_split_config "$SELECTED_FRPC_SPLIT_DIR" || { pause; continue; }
         edit_config_file "$SELECTED_CONFIG_FILE" "${SELECTED_FRPC_LABEL} 拆分配置" "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_SERVICE"
         pause
         ;;
-      5|delete-split|delete) delete_frpc_split_config; pause ;;
-      6|verify) verify_config_interactive "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"; pause ;;
+      7|delete-split|delete) delete_frpc_split_config; pause ;;
+      8|verify) verify_config_interactive "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -4619,23 +4804,36 @@ print_usage() {
 EOF_USAGE
 }
 
+run_cli_strict_import() {
+  local status
+  if "$@"; then
+    return 0
+  else
+    status=$?
+  fi
+  if [[ "${FRP_LIB_ONLY:-0}" == "1" ]]; then
+    return "$status"
+  fi
+  exit "$status"
+}
+
 run_cli() {
   local cmd="${1:-}" service action
   case "$cmd" in
     --import-frps-code)
       need_root
       load_installer_config
-      import_frps_pairing_code "${2:-}" "${3:-}" "true" "${4:-}"
+      run_cli_strict_import import_frps_pairing_code "${2:-}" "${3:-}" "true" "${4:-}"
       ;;
     --import-stcp-code)
       need_root
       load_installer_config
-      import_stcp_code_to_visitor "${2:-}" "${3:-}" "true" "${4:-}"
+      run_cli_strict_import import_stcp_code_to_visitor "${2:-}" "${3:-}" "true" "${4:-}"
       ;;
     --import-xtcp-code)
       need_root
       load_installer_config
-      import_xtcp_code_to_visitor "${2:-}" "${3:-}" "true" "${4:-}"
+      run_cli_strict_import import_xtcp_code_to_visitor "${2:-}" "${3:-}" "true" "${4:-}"
       ;;
     --xtcp-summary)
       [[ -n "${2:-}" ]] || fatal "缺少 XTCP 配置文件或目录路径。"

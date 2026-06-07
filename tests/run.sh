@@ -489,8 +489,12 @@ test_frpc_proxy_target_helpers() {
   assert_contains 'verify_config_interactive "${INSTALL_DIR}/frps" "$FRPS_CONFIG"' <(printf '%s\n' "$frps_menu_body") "frps verify menu catches verify failure"
   assert_contains 'verify_config_interactive "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"' <(printf '%s\n' "$frpc_target_body") "frpc verify menu catches verify failure"
   assert_contains 'ui_menu_item 2 "新增配置"' <(printf '%s\n' "$frpc_target_body") "selected client config menu exposes add config entry"
-  assert_contains 'ui_menu_item 5 "删除拆分配置"' <(printf '%s\n' "$frpc_target_body") "selected client config menu exposes delete config entry"
+  assert_contains 'ui_menu_item 3 "STCP 接入码"' <(printf '%s\n' "$frpc_target_body") "selected client config menu exposes stcp entry"
+  assert_contains 'ui_menu_item 4 "XTCP 接入码"' <(printf '%s\n' "$frpc_target_body") "selected client config menu exposes xtcp entry"
+  assert_contains 'ui_menu_item 7 "删除拆分配置"' <(printf '%s\n' "$frpc_target_body") "selected client config menu exposes delete config entry"
   assert_contains 'add_proxy_wizard "true"' <(printf '%s\n' "$frpc_target_body") "selected client add config reuses current target"
+  assert_contains 'stcp_pair_menu "$target_spec"' <(printf '%s\n' "$frpc_target_body") "selected client config menu opens stcp for current target"
+  assert_contains 'xtcp_pair_menu "$target_spec"' <(printf '%s\n' "$frpc_target_body") "selected client config menu opens xtcp for current target"
   assert_contains 'delete_frpc_split_config' <(printf '%s\n' "$frpc_target_body") "selected client config menu deletes split config"
   assert_not_contains 'select_frpc_split_dir_for_write || return 0' <(printf '%s\n' "$add_proxy_body") "proxy wizard does not choose target on entry"
   assert_contains 'ui_menu_item 1 "新增 TCP 配置"' <(printf '%s\n' "$add_proxy_body") "new config menu exposes tcp config entry"
@@ -750,6 +754,34 @@ test_import_targets_and_safe_failures() {
   assert_eq "1" "$bad_status" "strict stcp import decode failure returns non-zero"
   assert_contains '解密失败' <(printf '%s\n' "$bad_output") "strict stcp import explains decode failure"
 
+  local legacy_payload legacy_code cli_output cli_status
+  legacy_payload="$(render_stcp_payload "legacy_ssh" "legacy_ssh_visitor" "secret-key" "127.0.0.1" "6000" "" "")"
+  legacy_code="$(encrypt_payload_code "IFRP-STCP-V1" "passphrase" "$legacy_payload")"
+  cli_status=0
+  if cli_output="$(
+    (
+      CONFIG_DIR="${TMP_DIR}/legacy-stcp-cli"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${CONFIG_DIR}/logs"
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      FRPC_STORE="${CONFIG_DIR}/frpc-store.json"
+      need_root() { :; }
+      load_installer_config() { :; }
+      create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; }
+      run_cli --import-stcp-code "$legacy_code" "passphrase" default
+    ) 2>&1
+  )"; then
+    fail "cli legacy stcp import should fail cleanly without main config"
+  else
+    cli_status=$?
+  fi
+  assert_eq "1" "$cli_status" "cli legacy stcp import returns clean non-zero"
+  assert_contains '缺少 frps serverAddr/serverPort/token' <(printf '%s\n' "$cli_output") "cli legacy stcp import explains missing bootstrap fields"
+  assert_not_contains '脚本在第' <(printf '%s\n' "$cli_output") "cli legacy stcp import avoids ERR trap noise"
+
   local service_output
   service_output="$(
     (
@@ -971,6 +1003,8 @@ test_stcp_import_code_helpers() {
   require_function create_stcp_exposed_and_code
   require_function import_stcp_code_to_visitor
   require_function export_stcp_code_from_existing
+  require_function read_frpc_config_token
+  require_function bootstrap_selected_frpc_from_payload_if_needed
   require_function normalize_toml_array_csv
   require_function extract_proxy_field
   require_function list_proxy_names_in_file
@@ -984,9 +1018,19 @@ test_stcp_import_code_helpers() {
     "127.0.0.1" \
     "6000" \
     "remote-user" \
-    "*")"
+    "*" \
+    "frps.example.com" \
+    "7000" \
+    "server-token" \
+    "tcp" \
+    "true" \
+    "0" \
+    "1.1.1.1" \
+    "remote-user")"
 
   assert_eq "install-frp-stcp-v1" "$(parse_stcp_payload_value "$payload" format)" "stcp payload format"
+  assert_eq "frps.example.com" "$(parse_stcp_payload_value "$payload" serverAddr)" "stcp payload carries frps address"
+  assert_eq "server-token" "$(parse_stcp_payload_value "$payload" token)" "stcp payload carries frps token"
   assert_eq "secret_ssh" "$(parse_stcp_payload_value "$payload" proxyName)" "stcp proxy name parsed"
   assert_eq "secret_ssh_visitor" "$(parse_stcp_payload_value "$payload" visitorName)" "stcp visitor name parsed"
   assert_eq "remote-user" "$(parse_stcp_payload_value "$payload" serverUser)" "stcp server user parsed"
@@ -1023,9 +1067,12 @@ test_stcp_import_code_helpers() {
       FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
       PRESET_DIR="${CONFIG_DIR}/presets.d"
       LOG_DIR="${CONFIG_DIR}/logs"
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      FRPC_STORE="${CONFIG_DIR}/frpc-store.json"
       create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; : > "$FRPC_CONFIG"; }
       confirm() { return 0; }
       verify_config() { printf 'verify:%s\n' "$2"; return 23; }
+      write_systemd_service() { printf 'service-file:%s:%s\n' "$1" "$3"; }
       restart_service_if_present() { printf 'restart:%s\n' "$1"; }
       import_stcp_code_to_visitor "$code" "passphrase" "true" "default"
     ) 2>&1
@@ -1036,6 +1083,8 @@ test_stcp_import_code_helpers() {
   fi
   assert_eq "23" "$strict_status" "strict stcp import returns verify failure"
   assert_contains "verify:${TMP_DIR}/strict-stcp/frpc.toml" <(printf '%s\n' "$strict_output") "strict stcp import verifies selected config"
+  assert_contains 'serverAddr = "frps.example.com"' "${TMP_DIR}/strict-stcp/frpc.toml" "strict stcp import bootstraps main config"
+  assert_contains "server-token" "${TMP_DIR}/strict-stcp/token" "strict stcp import writes token"
   assert_not_contains 'restart:frpc' <(printf '%s\n' "$strict_output") "strict stcp import skips restart after verify failure"
 
   local instance_root="${TMP_DIR}/stcp-instance" instance_output
@@ -1047,16 +1096,21 @@ test_stcp_import_code_helpers() {
       FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
       PRESET_DIR="${CONFIG_DIR}/presets.d"
       LOG_DIR="${instance_root}/var/log/frp"
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      FRPC_STORE="${CONFIG_DIR}/frpc-store.json"
       create_dirs_and_user() {
         mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "${FRPC_CLIENTS_DIR}/home/frpc.d" "$PRESET_DIR" "$LOG_DIR"
         : > "${FRPC_CLIENTS_DIR}/home/frpc.toml"
       }
+      write_frpc_template_service() { printf 'template-service\n'; }
       verify_config() { printf 'verify:%s\n' "$2"; return 0; }
       restart_service_if_present() { printf 'restart:%s\n' "$1"; }
       import_stcp_code_to_visitor "$code" "passphrase" "true" "client:home"
     ) 2>&1
   )"
   assert_contains "verify:${instance_root}/etc/frp/clients/home/frpc.toml" <(printf '%s\n' "$instance_output") "strict stcp import verifies client target config"
+  assert_contains 'serverAddr = "frps.example.com"' "${instance_root}/etc/frp/clients/home/frpc.toml" "strict stcp import bootstraps client target"
+  assert_contains 'server-token' "${instance_root}/etc/frp/clients/home/token" "strict stcp import writes client token"
   assert_contains 'type = "stcp"' "${instance_root}/etc/frp/clients/home/frpc.d/secret_ssh_visitor.toml" "strict stcp import writes client target visitor"
   assert_contains 'restart:frpc@home' <(printf '%s\n' "$instance_output") "strict stcp import restarts client target"
 
@@ -1070,7 +1124,12 @@ test_stcp_import_code_helpers() {
       FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
       PRESET_DIR="${CONFIG_DIR}/presets.d"
       LOG_DIR="${create_root}/var/log/frp"
-      create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; : > "$FRPC_CONFIG"; }
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      create_dirs_and_user() {
+        mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"
+        printf 'serverAddr = "frps.example.com"\nserverPort = 7000\nuser = "remote-user"\nauth.tokenSource.file.path = "'"$TOKEN_FILE"'"\ntransport.protocol = "tcp"\ntransport.tls.enable = true\ntransport.poolCount = 0\n' > "$FRPC_CONFIG"
+        printf 'server-token\n' > "$TOKEN_FILE"
+      }
       ask_required() { printf 'secret_ssh'; }
       ask() {
         case "$1" in
@@ -1098,6 +1157,8 @@ test_stcp_import_code_helpers() {
   )"
   assert_contains 'type = "stcp"' "${create_root}/etc/frp/frpc.d/secret_ssh.toml" "stcp exposed setup writes proxy file"
   assert_contains 'payload:format = "install-frp-stcp-v1"' <(printf '%s\n' "$create_output") "stcp exposed setup emits stcp payload"
+  assert_contains 'serverAddr = "frps.example.com"' <(printf '%s\n' "$create_output") "stcp exposed setup payload carries frps address"
+  assert_contains 'token = "server-token"' <(printf '%s\n' "$create_output") "stcp exposed setup payload carries token"
   assert_contains '--import-stcp-code' <(printf '%s\n' "$create_output") "stcp exposed setup prints one-click import"
   assert_contains 'restart:frpc' <(printf '%s\n' "$create_output") "stcp exposed setup restarts selected service"
 
@@ -1111,8 +1172,10 @@ test_stcp_import_code_helpers() {
       FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
       PRESET_DIR="${CONFIG_DIR}/presets.d"
       LOG_DIR="${export_root}/var/log/frp"
+      TOKEN_FILE="${CONFIG_DIR}/token"
       mkdir -p "$FRPC_CONF_DIR" "$PRESET_DIR" "$LOG_DIR"
-      printf 'user = "remote-user"\n' > "$FRPC_CONFIG"
+      printf 'serverAddr = "frps.example.com"\nserverPort = 7000\nuser = "remote-user"\nauth.tokenSource.file.path = "'"$TOKEN_FILE"'"\ntransport.protocol = "tcp"\ntransport.tls.enable = true\ntransport.poolCount = 0\n' > "$FRPC_CONFIG"
+      printf 'server-token\n' > "$TOKEN_FILE"
       write_stcp_exposed_config "${FRPC_CONF_DIR}/secret_ssh.toml" "secret_ssh" "secret-key" "127.0.0.1" "22" "*"
       create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; }
       ask() {
@@ -1131,6 +1194,8 @@ test_stcp_import_code_helpers() {
     ) 2>&1
   )"
   assert_contains 'payload:format = "install-frp-stcp-v1"' <(printf '%s\n' "$export_output") "existing stcp export emits payload"
+  assert_contains 'serverAddr = "frps.example.com"' <(printf '%s\n' "$export_output") "existing stcp export keeps frps address"
+  assert_contains 'token = "server-token"' <(printf '%s\n' "$export_output") "existing stcp export keeps token"
   assert_contains 'proxyName = "secret_ssh"' <(printf '%s\n' "$export_output") "existing stcp export keeps proxy name"
   assert_contains 'serverUser = "remote-user"' <(printf '%s\n' "$export_output") "existing stcp export keeps server user"
   assert_contains '--import-stcp-code' <(printf '%s\n' "$export_output") "existing stcp export prints one-click import"
@@ -1169,10 +1234,17 @@ test_xtcp_import_code_helpers() {
     "quic" \
     "true" \
     "remote-user" \
-    "*")"
+    "*" \
+    "server-token" \
+    "tcp" \
+    "true" \
+    "0" \
+    "1.1.1.1" \
+    "remote-user")"
 
   assert_eq "install-frp-xtcp-v1" "$(parse_xtcp_payload_value "$payload" format)" "xtcp payload format"
   assert_eq "p2p_ssh" "$(parse_xtcp_payload_value "$payload" proxyName)" "xtcp proxy name parsed"
+  assert_eq "server-token" "$(parse_xtcp_payload_value "$payload" token)" "xtcp payload carries frps token"
   assert_eq "remote-user" "$(parse_xtcp_payload_value "$payload" serverUser)" "xtcp server user parsed"
   assert_eq "*" "$(parse_xtcp_payload_value "$payload" allowUsers)" "xtcp allow users parsed"
 
@@ -1212,10 +1284,13 @@ test_xtcp_import_code_helpers() {
       FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
       PRESET_DIR="${CONFIG_DIR}/presets.d"
       LOG_DIR="${CONFIG_DIR}/logs"
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      FRPC_STORE="${CONFIG_DIR}/frpc-store.json"
       create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; : > "$FRPC_CONFIG"; }
       ask() { printf '1'; }
       confirm() { return 0; }
       verify_config() { printf 'verify:%s\n' "$2"; return 19; }
+      write_systemd_service() { printf 'service-file:%s:%s\n' "$1" "$3"; }
       restart_service_if_present() { printf 'restart:%s\n' "$1"; }
       import_xtcp_code_to_visitor "$code" "passphrase" "true" "default"
     ) 2>&1
@@ -1226,6 +1301,8 @@ test_xtcp_import_code_helpers() {
   fi
   assert_eq "19" "$strict_status" "strict xtcp import returns verify failure"
   assert_contains "verify:${TMP_DIR}/strict-xtcp/frpc.toml" <(printf '%s\n' "$strict_output") "strict xtcp import verifies selected config"
+  assert_contains 'serverAddr = "frps.example.com"' "${TMP_DIR}/strict-xtcp/frpc.toml" "strict xtcp import bootstraps main config"
+  assert_contains 'server-token' "${TMP_DIR}/strict-xtcp/token" "strict xtcp import writes token"
   assert_not_contains 'restart:frpc' <(printf '%s\n' "$strict_output") "strict xtcp import skips restart after verify failure"
 
   local instance_root="${TMP_DIR}/xtcp-instance" instance_output
@@ -1237,16 +1314,21 @@ test_xtcp_import_code_helpers() {
       FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
       PRESET_DIR="${CONFIG_DIR}/presets.d"
       LOG_DIR="${instance_root}/var/log/frp"
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      FRPC_STORE="${CONFIG_DIR}/frpc-store.json"
       create_dirs_and_user() {
         mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "${FRPC_CLIENTS_DIR}/home/frpc.d" "$PRESET_DIR" "$LOG_DIR"
         : > "${FRPC_CLIENTS_DIR}/home/frpc.toml"
       }
+      write_frpc_template_service() { printf 'template-service\n'; }
       verify_config() { printf 'verify:%s\n' "$2"; return 0; }
       restart_service_if_present() { printf 'restart:%s\n' "$1"; }
       import_xtcp_code_to_visitor "$code" "passphrase" "true" "client:home"
     ) 2>&1
   )"
   assert_contains "verify:${instance_root}/etc/frp/clients/home/frpc.toml" <(printf '%s\n' "$instance_output") "strict xtcp import verifies client target config"
+  assert_contains 'serverAddr = "frps.example.com"' "${instance_root}/etc/frp/clients/home/frpc.toml" "strict xtcp import bootstraps client target"
+  assert_contains 'server-token' "${instance_root}/etc/frp/clients/home/token" "strict xtcp import writes client token"
   assert_contains 'type = "xtcp"' "${instance_root}/etc/frp/clients/home/frpc.d/p2p_ssh_visitor.toml" "strict xtcp import writes client target visitor"
   assert_contains 'restart:frpc@home' <(printf '%s\n' "$instance_output") "strict xtcp import restarts client target"
 
@@ -1299,8 +1381,10 @@ EOF_OLD_XTCP_VISITOR
       FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
       PRESET_DIR="${CONFIG_DIR}/presets.d"
       LOG_DIR="${export_root}/var/log/frp"
+      TOKEN_FILE="${CONFIG_DIR}/token"
       mkdir -p "$FRPC_CONF_DIR" "$PRESET_DIR" "$LOG_DIR"
-      printf 'serverAddr = "frps.example.com"\nserverPort = 7000\nuser = "remote-user"\n' > "$FRPC_CONFIG"
+      printf 'serverAddr = "frps.example.com"\nserverPort = 7000\nuser = "remote-user"\nauth.tokenSource.file.path = "'"$TOKEN_FILE"'"\ntransport.protocol = "tcp"\ntransport.tls.enable = true\ntransport.poolCount = 0\n' > "$FRPC_CONFIG"
+      printf 'server-token\n' > "$TOKEN_FILE"
       write_xtcp_exposed_config "${FRPC_CONF_DIR}/p2p_ssh.toml" "p2p_ssh" "secret-key" "127.0.0.1" "22" "true" "p2p_ssh_stcp" "true" "*"
       create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; }
       ask_required() { printf '%s' "${2:-frps.example.com}"; }
@@ -1324,6 +1408,7 @@ EOF_OLD_XTCP_VISITOR
   )"
   assert_contains 'payload:format = "install-frp-xtcp-v1"' <(printf '%s\n' "$export_output") "existing xtcp export emits payload"
   assert_contains 'serverAddr = "frps.example.com"' <(printf '%s\n' "$export_output") "existing xtcp export keeps frps address"
+  assert_contains 'token = "server-token"' <(printf '%s\n' "$export_output") "existing xtcp export keeps token"
   assert_contains 'fallback = true' <(printf '%s\n' "$export_output") "existing xtcp export keeps fallback"
   assert_contains 'disableAssistedAddrs = true' <(printf '%s\n' "$export_output") "existing xtcp export keeps nat option"
   assert_contains '--import-xtcp-code' <(printf '%s\n' "$export_output") "existing xtcp export prints one-click import"
@@ -1422,6 +1507,7 @@ test_frps_pairing_code_helpers() {
       ask() { printf '1'; }
       confirm() { return 0; }
       verify_config() { printf 'verify:%s\n' "$2"; return 17; }
+      write_systemd_service() { printf 'service-file:%s:%s\n' "$1" "$3"; }
       restart_service_if_present() { printf 'restart:%s\n' "$1"; }
       import_frps_pairing_code "$code" "passphrase" "true" "default"
     ) 2>&1
@@ -1431,6 +1517,7 @@ test_frps_pairing_code_helpers() {
     import_status=$?
   fi
   assert_eq "17" "$import_status" "strict frps import returns verify failure"
+  assert_contains "service-file:frpc:${TMP_DIR}/strict-frps/frpc.toml" <(printf '%s\n' "$import_output") "strict frps import writes default service before verify"
   assert_contains "verify:${TMP_DIR}/strict-frps/frpc.toml" <(printf '%s\n' "$import_output") "strict frps import verifies target config"
   assert_not_contains 'restart:frpc' <(printf '%s\n' "$import_output") "strict frps import skips restart after verify failure"
 
@@ -1452,6 +1539,7 @@ test_frps_pairing_code_helpers() {
       import_frps_pairing_code "$code" "passphrase" "true" "instance:home"
     ) 2>&1
   )"
+  assert_contains 'template-service' <(printf '%s\n' "$instance_output") "strict frps import writes named template service"
   assert_contains "verify:${instance_root}/etc/frp/clients/home/frpc.toml" <(printf '%s\n' "$instance_output") "strict frps import verifies named instance config"
   assert_contains 'serverAddr = "frps.example.com"' "${instance_root}/etc/frp/clients/home/frpc.toml" "strict frps import writes named instance config"
   assert_contains 'server-token#frag' "${instance_root}/etc/frp/clients/home/token" "strict frps import writes named instance token"

@@ -19,7 +19,7 @@
 - 支持编辑 `frps.toml`、`frpc.toml`、`frpc.d/*.toml` 和其它客户端配置
 - 编辑配置前自动备份，编辑后可校验并重启服务
 - 支持 `frps` 导出加密接入码，新机器一键导入为 `frpc`
-- 支持 XTCP/STCP 加密导入码，减少两端手工配对出错
+- 支持 XTCP/STCP 加密导入码，导入码包含 frps 连接信息，可在新机器生成访问端 `frpc`
 - 支持自定义 frpc 预设、手动配置、直接粘贴 TOML
 - 支持安装摘要查看和完整卸载
 
@@ -48,7 +48,7 @@ sudo bash frp.sh
 菜单顶部只显示运行概况；版本和配置细节在子菜单和安装摘要里查看：
 
 ```text
-frp 管理脚本 2026.06.07-r29
+frp 管理脚本 2026.06.07-r32
 状态：服务端:未运行 | 客户端:2个/运行1
 ```
 
@@ -93,7 +93,7 @@ IFRP-FRPC-V1:<加密内容>
 bash <(curl -fsSL 'https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh') --import-frps-code 'IFRP-FRPC-V1:...' '解密码' default
 ```
 
-把一键导入命令发到新机器执行，即可解密并生成默认 `frpc` 配置；高级脚本场景可把最后的 `default` 改成 `client:<name>` 写入指定客户端目录。旧版的 `instance:<name>` 仍兼容。
+把一键导入命令发到新机器执行，即可解密并生成默认 `frpc` 配置、token 文件和 `frpc.service`；高级脚本场景可把最后的 `default` 改成 `client:<name>` 写入指定客户端目录。旧版的 `instance:<name>` 仍兼容。
 
 ---
 
@@ -200,14 +200,16 @@ bash frp.sh --service frpc@home restart
 ```text
 1) 查看配置
 2) 新增配置
-3) 编辑主配置
-4) 编辑拆分配置
-5) 删除拆分配置
-6) 校验配置
+3) STCP 接入码
+4) XTCP 接入码
+5) 编辑主配置
+6) 编辑拆分配置
+7) 删除拆分配置
+8) 校验配置
 0) 返回
 ```
 
-在这个页面选择“新增配置”时，脚本会直接写入当前客户端的拆分目录，不会再重复询问写入目标。选择“删除拆分配置”会列出当前客户端的 `frpc.d/*.toml`，确认后先备份再删除、校验主配置，并提示重启对应客户端。
+在这个页面选择“新增配置”时，脚本会直接写入当前客户端的拆分目录，不会再重复询问写入目标。STCP/XTCP 接入码也可以在当前客户端页面直接创建、导入或复制。选择“删除拆分配置”会列出当前客户端的 `frpc.d/*.toml`，确认后先备份再删除、校验主配置，并提示重启对应客户端。
 
 编辑器选择顺序：
 
@@ -228,11 +230,11 @@ frpc verify -c /etc/frp/frpc.toml
 
 ## STCP / XTCP 加密导入码
 
-STCP 和 XTCP 都需要两端 `frpc` 配对：被访问端创建 `[[proxies]]`，访问端创建 `[[visitors]]`。脚本提供加密导入码，减少手工复制 `serverName`、`secretKey`、fallback 等字段出错。
+STCP 和 XTCP 都需要两端 `frpc` 配对：被访问端创建 `[[proxies]]`，访问端创建 `[[visitors]]`。脚本提供加密导入码，减少手工复制 `serverName`、`secretKey`、fallback 等字段出错。新版 STCP/XTCP 码还会带上 `serverAddr/serverPort/token/transport`，访问端没有 `frpc.toml` 时也能先生成主配置。
 
 ### STCP 接入码
 
-STCP 适合不想在服务端暴露业务端口的安全 TCP 访问。进入 `新增配置 -> STCP 接入码`：
+STCP 适合不想在服务端暴露业务端口的安全 TCP 访问。进入 `新增配置 -> STCP 接入码`，或在 `客户端管理 -> 配置文件 -> 当前客户端 -> STCP 接入码`：
 
 ```text
 1) 创建被访问端
@@ -248,7 +250,7 @@ IFRP-STCP-V1:<加密内容>
 bash <(curl -fsSL 'https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh') --import-stcp-code 'IFRP-STCP-V1:...' '解密码' default
 ```
 
-访问端执行一键命令后会写入 `[[visitors]] type = "stcp"`。两端会使用同一个 `secretKey`，访问端的 `serverName` 指向被访问端的 `proxyName`。
+访问端执行一键命令后会先补齐 `frpc.toml` 和 token 文件，再写入 `[[visitors]] type = "stcp"`。两端会使用同一个 `secretKey`，访问端的 `serverName` 指向被访问端的 `proxyName`。旧版 STCP 短码如果不包含 frps 信息，空机器导入会提示先重新导出新版接入码或先导入 frps 接入码。
 
 ### XTCP 接入码
 
@@ -271,7 +273,7 @@ bash <(curl -fsSL 'https://raw.githubusercontent.com/qimaoww/install-frp/main/fr
 
 创建被访问端 XTCP 配置后，脚本会提示重启对应 `frpc`，让 `[[proxies]]` 注册到 `frps`。如果跳过这一步，访问端会看到类似 `xtcp server for [name] doesn't exist` 的错误。
 
-脚本会把访问端 XTCP 底层协议、`serverUser` 和 `allowUsers` 写入导入码。默认使用 `quic`；如果你的网络环境下 `kcp` 更稳，也可以手动选择 `kcp`。当日志里出现 Docker、VPN、`100.64.0.0/10` 之类辅助地址干扰时，再启用“禁用辅助地址”。启用后，新生成配置会在被访问端 proxy 和访问端 visitor 两边写入：
+脚本会把访问端 XTCP 底层协议、`serverUser`、`allowUsers` 和 frps 连接信息写入导入码。默认使用 `quic`；如果你的网络环境下 `kcp` 更稳，也可以手动选择 `kcp`。当日志里出现 Docker、VPN、`100.64.0.0/10` 之类辅助地址干扰时，再启用“禁用辅助地址”。启用后，新生成配置会在被访问端 proxy 和访问端 visitor 两边写入：
 
 ```toml
 protocol = "quic"
@@ -411,7 +413,7 @@ GH_PROXY=https://ghfast.top/ bash frp.sh
 ## 安全提醒
 
 - 不要公开 `auth.token`、`tokenSource` 文件内容或加密接入码解密码
-- 不要公开 XTCP/STCP 的 `secretKey`、XTCP 导入码解密码
+- 不要公开 XTCP/STCP 的 `secretKey`、STCP/XTCP 导入码和解密码；新版导入码还包含 frps token
 - Dashboard / Admin UI 建议只监听 `127.0.0.1`
 - 如果必须公网暴露 Dashboard / Admin UI，请务必使用强密码，并通过防火墙限制来源 IP
 - `frpc.d`、其它客户端目录和 `presets.d` 中可能包含敏感信息，请谨慎备份和分享
