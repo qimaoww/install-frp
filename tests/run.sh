@@ -970,6 +970,10 @@ test_stcp_import_code_helpers() {
   require_function write_stcp_visitor_config_from_payload
   require_function create_stcp_exposed_and_code
   require_function import_stcp_code_to_visitor
+  require_function export_stcp_code_from_existing
+  require_function normalize_toml_array_csv
+  require_function extract_proxy_field
+  require_function list_proxy_names_in_file
   require_function stcp_pair_menu
 
   local payload code decoded exposed_file visitor_file
@@ -997,6 +1001,9 @@ test_stcp_import_code_helpers() {
   assert_contains 'type = "stcp"' "$exposed_file" "stcp exposed proxy rendered"
   assert_contains 'localPort = 22' "$exposed_file" "stcp exposed local port rendered"
   assert_contains 'allowUsers = ["*"]' "$exposed_file" "stcp exposed allow users rendered"
+  assert_eq "secret_ssh" "$(list_proxy_names_in_file "$exposed_file" stcp)" "stcp proxy name is discoverable"
+  assert_eq "secret-key" "$(extract_proxy_field "$exposed_file" stcp secret_ssh secretKey)" "stcp proxy secret is readable"
+  assert_eq "*" "$(normalize_toml_array_csv '["*"]')" "toml allowUsers array normalizes to csv"
 
   visitor_file="${TMP_DIR}/stcp-visitor.toml"
   write_stcp_visitor_config_from_payload "$visitor_file" "$payload"
@@ -1093,6 +1100,40 @@ test_stcp_import_code_helpers() {
   assert_contains 'payload:format = "install-frp-stcp-v1"' <(printf '%s\n' "$create_output") "stcp exposed setup emits stcp payload"
   assert_contains '--import-stcp-code' <(printf '%s\n' "$create_output") "stcp exposed setup prints one-click import"
   assert_contains 'restart:frpc' <(printf '%s\n' "$create_output") "stcp exposed setup restarts selected service"
+
+  local export_root export_output
+  export_root="${TMP_DIR}/export-stcp"
+  export_output="$(
+    (
+      CONFIG_DIR="${export_root}/etc/frp"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${export_root}/var/log/frp"
+      mkdir -p "$FRPC_CONF_DIR" "$PRESET_DIR" "$LOG_DIR"
+      printf 'user = "remote-user"\n' > "$FRPC_CONFIG"
+      write_stcp_exposed_config "${FRPC_CONF_DIR}/secret_ssh.toml" "secret_ssh" "secret-key" "127.0.0.1" "22" "*"
+      create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; }
+      ask() {
+        case "$1" in
+          请选择*) printf '1' ;;
+          访问端配置名*) printf 'secret_ssh_visitor' ;;
+          访问端本地监听地址*) printf '127.0.0.1' ;;
+          被访问端\ frpc\ user*) printf '%s' "${2:-}" ;;
+          导入码加密口令*) printf 'passphrase' ;;
+          *) printf '%s' "${2:-}" ;;
+        esac
+      }
+      ask_port() { printf '6000'; }
+      encrypt_payload_code() { printf 'IFRP-STCP-V1:test'; printf '\npayload:%s\n' "$3" >&2; }
+      export_stcp_code_from_existing default
+    ) 2>&1
+  )"
+  assert_contains 'payload:format = "install-frp-stcp-v1"' <(printf '%s\n' "$export_output") "existing stcp export emits payload"
+  assert_contains 'proxyName = "secret_ssh"' <(printf '%s\n' "$export_output") "existing stcp export keeps proxy name"
+  assert_contains 'serverUser = "remote-user"' <(printf '%s\n' "$export_output") "existing stcp export keeps server user"
+  assert_contains '--import-stcp-code' <(printf '%s\n' "$export_output") "existing stcp export prints one-click import"
 }
 
 test_xtcp_import_code_helpers() {
@@ -1108,6 +1149,7 @@ test_xtcp_import_code_helpers() {
   require_function render_xtcp_path_summary
   require_function repair_xtcp_path
   require_function xtcp_config_check_menu
+  require_function export_xtcp_code_from_existing
   require_function xtcp_pair_menu
 
   local payload code decoded visitor_file exposed_file
@@ -1157,6 +1199,8 @@ test_xtcp_import_code_helpers() {
   assert_contains '[visitors.natTraversal]' "$visitor_file" "xtcp nat traversal section rendered"
   assert_contains 'disableAssistedAddrs = true' "$visitor_file" "xtcp assisted addresses disabled"
   assert_contains 'bindPort = -1' "$visitor_file" "stcp fallback bind port rendered"
+  assert_eq "p2p_ssh" "$(list_proxy_names_in_file "$exposed_file" xtcp)" "xtcp proxy name is discoverable"
+  assert_eq "true" "$(extract_proxy_field "$exposed_file" xtcp p2p_ssh disableAssistedAddrs)" "xtcp nat option is readable"
 
   local strict_output strict_status
   strict_status=0
@@ -1245,9 +1289,50 @@ EOF_OLD_XTCP_VISITOR
   repair_xtcp_path "$xtcp_dir" "quic" "true" "5000" >/dev/null
   assert_contains 'keepTunnelOpen = true' "${xtcp_dir}/p2p_ssh_visitor.toml" "xtcp dir repair keeps tunnel open"
 
+  local export_root export_output
+  export_root="${TMP_DIR}/export-xtcp"
+  export_output="$(
+    (
+      CONFIG_DIR="${export_root}/etc/frp"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${export_root}/var/log/frp"
+      mkdir -p "$FRPC_CONF_DIR" "$PRESET_DIR" "$LOG_DIR"
+      printf 'serverAddr = "frps.example.com"\nserverPort = 7000\nuser = "remote-user"\n' > "$FRPC_CONFIG"
+      write_xtcp_exposed_config "${FRPC_CONF_DIR}/p2p_ssh.toml" "p2p_ssh" "secret-key" "127.0.0.1" "22" "true" "p2p_ssh_stcp" "true" "*"
+      create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; }
+      ask_required() { printf '%s' "${2:-frps.example.com}"; }
+      ask() {
+        case "$1" in
+          请选择*) printf '1' ;;
+          访问端配置名*) printf 'p2p_ssh_visitor' ;;
+          访问端本地监听地址*) printf '127.0.0.1' ;;
+          访问端\ XTCP*) printf 'quic' ;;
+          fallbackTimeoutMs*) printf '5000' ;;
+          被访问端\ frpc\ user*) printf '%s' "${2:-}" ;;
+          导入码加密口令*) printf 'passphrase' ;;
+          *) printf '%s' "${2:-}" ;;
+        esac
+      }
+      ask_port() { printf '%s' "${2:-6000}"; }
+      ask_yes_no_value() { printf 'true'; }
+      encrypt_payload_code() { printf 'IFRP-XTCP-V1:test'; printf '\npayload:%s\n' "$3" >&2; }
+      export_xtcp_code_from_existing default
+    ) 2>&1
+  )"
+  assert_contains 'payload:format = "install-frp-xtcp-v1"' <(printf '%s\n' "$export_output") "existing xtcp export emits payload"
+  assert_contains 'serverAddr = "frps.example.com"' <(printf '%s\n' "$export_output") "existing xtcp export keeps frps address"
+  assert_contains 'fallback = true' <(printf '%s\n' "$export_output") "existing xtcp export keeps fallback"
+  assert_contains 'disableAssistedAddrs = true' <(printf '%s\n' "$export_output") "existing xtcp export keeps nat option"
+  assert_contains '--import-xtcp-code' <(printf '%s\n' "$export_output") "existing xtcp export prints one-click import"
+
   xtcp_menu_body="$(declare -f xtcp_pair_menu)"
-  assert_contains 'ui_menu_item 3 "检查/修复现有配置"' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu uses unified check entry"
-  assert_not_contains '4) 查看 XTCP 配置摘要' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu removes separate summary entry"
+  assert_contains 'ui_menu_item 3 "复制接入码"' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu exports existing code"
+  assert_contains 'ui_menu_item 4 "检查/修复"' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu keeps concise repair entry"
+  assert_not_contains '现有配置' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu removes verbose repair text"
+  assert_not_contains '查看 XTCP 配置摘要' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu removes separate summary entry"
   assert_not_contains 'repair_xtcp_config_menu' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu removes single-file repair path"
   assert_not_contains 'show_xtcp_config_summary_menu' <(printf '%s\n' "$xtcp_menu_body") "xtcp menu removes single-file summary path"
   declare -f run_cli | grep -Fq -- '--xtcp-summary' || fail "cli should expose xtcp summary"
@@ -1548,7 +1633,7 @@ EOF_FAKE_FRPC_RESTORE
   frpc_menu="$(render_frpc_menu)"
   frps_menu="$(render_frps_menu)"
   assert_contains '1) 安装/更新客户端' <(printf '%s\n' "$frpc_menu") "client menu has install entry"
-  assert_contains '2) 启动并自启/停止/重启并自启' <(printf '%s\n' "$frpc_menu") "client menu exposes service management"
+  assert_contains '2) 服务管理' <(printf '%s\n' "$frpc_menu") "client menu exposes service management"
   assert_contains '3) 客户端列表' <(printf '%s\n' "$frpc_menu") "client menu exposes client list management"
   assert_contains '4) 配置文件' <(printf '%s\n' "$frpc_menu") "client menu groups view edit verify config"
   assert_contains '5) 日志' <(printf '%s\n' "$frpc_menu") "client menu exposes logs"
@@ -1576,7 +1661,7 @@ EOF_FAKE_FRPC_RESTORE
   assert_contains "'pa ss'\\''word'" <(printf '%s\n' "$import_cmd") "one-click command quotes passphrase"
   ! printf '%s\n' "$import_cmd" | grep -Fq '/refs/heads/main/' || fail "one-click command should avoid stale refs/heads raw cache"
   declare -f export_frps_pairing_code | grep -Fq 'render_one_click_import_command "frps"' || fail "frps export should print one-click import command"
-  declare -f create_xtcp_exposed_and_code | grep -Fq 'render_one_click_import_command "xtcp"' || fail "xtcp export should print one-click import command"
+  declare -f create_xtcp_exposed_and_code | grep -Fq 'print_encrypted_import_code "xtcp"' || fail "xtcp export should print one-click import command"
   declare -f run_cli | grep -Fq 'import_frps_pairing_code "${2:-}" "${3:-}" "true" "${4:-}"' || fail "cli frps import should use strict verify and explicit target"
   declare -f run_cli | grep -Fq 'import_xtcp_code_to_visitor "${2:-}" "${3:-}" "true" "${4:-}"' || fail "cli xtcp import should use strict verify and explicit target"
 

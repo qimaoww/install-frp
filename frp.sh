@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r29}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r30}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -314,6 +314,19 @@ render_one_click_import_command() {
     "$(shell_quote "$target")"
 }
 
+print_encrypted_import_code() {
+  local kind="$1" title="$2" code="$3" passphrase="$4"
+  warn "下面的导入码和口令合在一起等同于 secretKey，请勿公开。"
+  echo
+  echo "========== ${title} 加密导入码 =========="
+  echo "$code"
+  echo "========== 解密码 =========="
+  echo "$passphrase"
+  echo "========== 一键导入命令（含解密码） =========="
+  render_one_click_import_command "$kind" "$code" "$passphrase"
+  echo "===================================="
+}
+
 parse_payload_value() {
   local payload="$1" key="$2"
   awk -v want="$key" '
@@ -365,6 +378,257 @@ read_toml_value() {
       }
     }
   ' "$file"
+}
+
+normalize_toml_array_csv() {
+  local value="$1" part out="" oldifs arr=()
+  value="$(trim "$value")"
+  if [[ "$value" == \[*\] ]]; then
+    value="${value#[}"
+    value="${value%]}"
+  fi
+  oldifs="$IFS"
+  IFS=',' read -r -a arr <<< "$value"
+  IFS="$oldifs"
+  for part in "${arr[@]}"; do
+    part="$(trim "$part")"
+    if [[ "$part" == \"*\" && "$part" == *\" ]]; then
+      part="${part#\"}"
+      part="${part%\"}"
+    elif [[ "$part" == \'*\' && "$part" == *\' ]]; then
+      part="${part#\'}"
+      part="${part%\'}"
+    fi
+    part="${part//\\\"/\"}"
+    part="${part//\\\\/\\}"
+    [[ -z "$part" ]] && continue
+    [[ -n "$out" ]] && out+=","
+    out+="$part"
+  done
+  printf '%s' "$out"
+}
+
+extract_proxy_field() {
+  local file="$1" proxy_type="$2" proxy_name="$3" field="$4"
+  [[ -f "$file" ]] || return 0
+  awk -v want_type="$proxy_type" -v want_name="$proxy_name" -v want_field="$field" '
+    function trim(s) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      return s
+    }
+    function unquote(s) {
+      s = trim(s)
+      if (s ~ /^".*"$/) {
+        sub(/^"/, "", s)
+        sub(/"$/, "", s)
+        gsub(/\\"/, "\"", s)
+        gsub(/\\\\/, "\\", s)
+      } else if (s ~ /^'\''.*'\''$/) {
+        sub(/^'\''/, "", s)
+        sub(/'\''$/, "", s)
+      }
+      return s
+    }
+    function reset_proxy() {
+      in_proxy = 0
+      in_nat = 0
+      name = ""
+      type = ""
+      secret = ""
+      local_ip = ""
+      local_port = ""
+      allow_users = ""
+      disable_assisted = ""
+    }
+    function emit_if_match() {
+      if (!in_proxy || type != want_type || (want_name != "" && name != want_name)) return 0
+      if (want_field == "name") print name
+      else if (want_field == "type") print type
+      else if (want_field == "secretKey") print secret
+      else if (want_field == "localIP") print local_ip
+      else if (want_field == "localPort") print local_port
+      else if (want_field == "allowUsers") print allow_users
+      else if (want_field == "disableAssistedAddrs") print disable_assisted
+      printed = 1
+      return 1
+    }
+    BEGIN { reset_proxy(); printed = 0 }
+    /^[[:space:]]*\[\[proxies\]\][[:space:]]*$/ {
+      if (emit_if_match()) exit
+      reset_proxy()
+      in_proxy = 1
+      next
+    }
+    /^[[:space:]]*\[\[(visitors|proxies)\]\][[:space:]]*$/ {
+      if (emit_if_match()) exit
+      reset_proxy()
+      next
+    }
+    /^[[:space:]]*\[proxies\.natTraversal\][[:space:]]*$/ {
+      if (in_proxy) in_nat = 1
+      next
+    }
+    /^[[:space:]]*\[/ {
+      in_nat = 0
+      next
+    }
+    {
+      if (!in_proxy) next
+      pos = index($0, "=")
+      if (pos == 0) next
+      k = trim(substr($0, 1, pos - 1))
+      v = trim(substr($0, pos + 1))
+      if (in_nat && k == "disableAssistedAddrs") disable_assisted = unquote(v)
+      else if (k == "name") name = unquote(v)
+      else if (k == "type") type = unquote(v)
+      else if (k == "secretKey") secret = unquote(v)
+      else if (k == "localIP") local_ip = unquote(v)
+      else if (k == "localPort") local_port = unquote(v)
+      else if (k == "allowUsers") allow_users = v
+    }
+    END { if (!printed) emit_if_match() }
+  ' "$file"
+}
+
+list_proxy_names_in_file() {
+  local file="$1" proxy_type="$2"
+  [[ -f "$file" ]] || return 0
+  awk -v want_type="$proxy_type" '
+    function trim(s) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      return s
+    }
+    function unquote(s) {
+      s = trim(s)
+      if (s ~ /^".*"$/) {
+        sub(/^"/, "", s)
+        sub(/"$/, "", s)
+      } else if (s ~ /^'\''.*'\''$/) {
+        sub(/^'\''/, "", s)
+        sub(/'\''$/, "", s)
+      }
+      return s
+    }
+    function reset_proxy() {
+      in_proxy = 0
+      name = ""
+      type = ""
+    }
+    function flush_proxy() {
+      if (in_proxy && type == want_type && name != "") print name
+      reset_proxy()
+    }
+    BEGIN { reset_proxy() }
+    /^[[:space:]]*\[\[proxies\]\][[:space:]]*$/ {
+      flush_proxy()
+      in_proxy = 1
+      next
+    }
+    /^[[:space:]]*\[\[(visitors|proxies)\]\][[:space:]]*$/ {
+      flush_proxy()
+      next
+    }
+    /^[[:space:]]*\[/ { next }
+    {
+      if (!in_proxy) next
+      pos = index($0, "=")
+      if (pos == 0) next
+      k = trim(substr($0, 1, pos - 1))
+      v = unquote(substr($0, pos + 1))
+      if (k == "name") name = v
+      else if (k == "type") type = v
+    }
+    END { flush_proxy() }
+  ' "$file"
+}
+
+proxy_file_has_type() {
+  local file="$1" proxy_type="$2"
+  if list_proxy_names_in_file "$file" "$proxy_type" | grep -q .; then
+    printf 'true\n'
+  else
+    printf 'false\n'
+  fi
+}
+
+list_proxy_config_files() {
+  local dir="$1" proxy_type="$2" files=() file
+  [[ -d "$dir" ]] || return 0
+  mapfile -d '' -t files < <(find "$dir" -maxdepth 1 -type f -name '*.toml' -print0 2>/dev/null | sort -z)
+  for file in "${files[@]}"; do
+    if [[ "$(proxy_file_has_type "$file" "$proxy_type")" == "true" ]]; then
+      printf '%s\n' "$file"
+    fi
+  done
+}
+
+find_proxy_name_by_type_secret() {
+  local file="$1" proxy_type="$2" secret="$3" name current_secret
+  [[ -n "$secret" ]] || return 1
+  while IFS= read -r name; do
+    current_secret="$(extract_proxy_field "$file" "$proxy_type" "$name" secretKey)"
+    if [[ "$current_secret" == "$secret" ]]; then
+      printf '%s' "$name"
+      return 0
+    fi
+  done < <(list_proxy_names_in_file "$file" "$proxy_type")
+  return 1
+}
+
+choose_proxy_config_file() {
+  local proxy_type="$1" dir="${2:-$FRPC_CONF_DIR}" files=() file idx choice
+  SELECTED_CONFIG_FILE=""
+  mapfile -t files < <(list_proxy_config_files "$dir" "$proxy_type")
+  if (( ${#files[@]} == 0 )); then
+    warn "没有找到 ${proxy_type^^} 被访问端配置：${dir}/*.toml"
+    return 1
+  fi
+  echo
+  info "选择 ${proxy_type^^} 配置"
+  idx=1
+  for file in "${files[@]}"; do
+    printf '%s) %s\n' "$idx" "$(basename "$file")"
+    idx=$((idx+1))
+  done
+  echo "0) 返回"
+  choice="$(ask "请选择" "1")"
+  [[ "$choice" == "0" || "$choice" =~ ^[Qq]$ ]] && return 1
+  if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#files[@]} )); then
+    SELECTED_CONFIG_FILE="${files[$((choice-1))]}"
+    return 0
+  fi
+  warn "无效选择。"
+  return 1
+}
+
+choose_proxy_name_in_file() {
+  local file="$1" proxy_type="$2" names=() idx choice
+  SELECTED_PROXY_NAME=""
+  mapfile -t names < <(list_proxy_names_in_file "$file" "$proxy_type")
+  if (( ${#names[@]} == 0 )); then
+    warn "配置中没有 ${proxy_type^^} 被访问端：$file"
+    return 1
+  fi
+  if (( ${#names[@]} == 1 )); then
+    SELECTED_PROXY_NAME="${names[0]}"
+    return 0
+  fi
+  echo
+  info "选择 ${proxy_type^^} 名称"
+  idx=1
+  for name in "${names[@]}"; do
+    printf '%s) %s\n' "$idx" "$name"
+    idx=$((idx+1))
+  done
+  echo "0) 返回"
+  choice="$(ask "请选择" "1")"
+  [[ "$choice" == "0" || "$choice" =~ ^[Qq]$ ]] && return 1
+  if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#names[@]} )); then
+    SELECTED_PROXY_NAME="${names[$((choice-1))]}"
+    return 0
+  fi
+  warn "无效选择。"
+  return 1
 }
 
 write_token_file() {
@@ -2511,15 +2775,7 @@ create_stcp_exposed_and_code() {
   [[ -z "$passphrase" ]] && passphrase="$(random_secret | cut -c1-20)"
   code="$(encrypt_payload_code "IFRP-STCP-V1" "$passphrase" "$payload")"
 
-  warn "下面的导入码和口令合在一起等同于 secretKey，请勿公开。"
-  echo
-  echo "========== STCP 加密导入码 =========="
-  echo "$code"
-  echo "========== 解密码 =========="
-  echo "$passphrase"
-  echo "========== 一键导入命令（含解密码） =========="
-  render_one_click_import_command "stcp" "$code" "$passphrase"
-  echo "===================================="
+  print_encrypted_import_code "stcp" "STCP" "$code" "$passphrase"
   restart_service_if_present "$SELECTED_FRPC_SERVICE"
 }
 
@@ -2568,18 +2824,50 @@ import_stcp_code_to_visitor() {
   ok "已导入 STCP 访问端配置：$file"
 }
 
+export_stcp_code_from_existing() {
+  create_dirs_and_user
+  local target_spec="${1:-}" file name secret bind_addr bind_port visitor_name server_user allow_users_raw allow_users
+  local passphrase payload code
+  select_frpc_split_dir_for_write "$target_spec" || return 0
+  choose_proxy_config_file stcp "$SELECTED_FRPC_SPLIT_DIR" || return 0
+  file="$SELECTED_CONFIG_FILE"
+  choose_proxy_name_in_file "$file" stcp || return 0
+  name="$SELECTED_PROXY_NAME"
+  secret="$(extract_proxy_field "$file" stcp "$name" secretKey)"
+  if [[ -z "$secret" ]]; then
+    warn "该 STCP 配置缺少 secretKey，不能导出接入码：$file"
+    return 0
+  fi
+  allow_users_raw="$(extract_proxy_field "$file" stcp "$name" allowUsers)"
+  allow_users="$(normalize_toml_array_csv "$allow_users_raw")"
+  visitor_name="$(ask "访问端配置名 visitorName" "${name}_visitor")"
+  bind_addr="$(ask "访问端本地监听地址 bindAddr" "127.0.0.1")"
+  bind_port="$(ask_port "访问端本地监听端口 bindPort" "6000")"
+  server_user="$(ask "被访问端 frpc user serverUser，留空默认同访问端 user" "$(read_toml_value "$SELECTED_FRPC_CONFIG" "user")")"
+  passphrase="$(ask "导入码加密口令，留空随机生成" "")"
+  [[ -z "$passphrase" ]] && passphrase="$(random_secret | cut -c1-20)"
+  payload="$(render_stcp_payload "$name" "$visitor_name" "$secret" "$bind_addr" "$bind_port" "$server_user" "$allow_users")"
+  code="$(encrypt_payload_code "IFRP-STCP-V1" "$passphrase" "$payload")"
+
+  echo "来源：$file"
+  echo "配置：$name"
+  print_encrypted_import_code "stcp" "STCP" "$code" "$passphrase"
+}
+
 stcp_pair_menu() {
   local target_spec="${1:-}"
   while true; do
     menu_title "客户端 / STCP"
     ui_menu_item 1 "创建被访问端" "生成加密导入码"
     ui_menu_item 2 "导入访问端" "粘贴加密导入码"
+    ui_menu_item 3 "复制接入码" "从已有配置导出"
     ui_menu_back
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
       1) create_stcp_exposed_and_code "$target_spec"; pause ;;
       2) import_stcp_code_to_visitor "" "" "false" "$target_spec"; pause ;;
+      3) export_stcp_code_from_existing "$target_spec"; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -2631,15 +2919,7 @@ create_xtcp_exposed_and_code() {
   [[ -z "$passphrase" ]] && passphrase="$(random_secret | cut -c1-20)"
   code="$(encrypt_payload_code "IFRP-XTCP-V1" "$passphrase" "$payload")"
 
-  warn "下面的导入码和口令合在一起等同于 secretKey，请勿公开。"
-  echo
-  echo "========== XTCP 加密导入码 =========="
-  echo "$code"
-  echo "========== 解密码 =========="
-  echo "$passphrase"
-  echo "========== 一键导入命令（含解密码） =========="
-  render_one_click_import_command "xtcp" "$code" "$passphrase"
-  echo "===================================="
+  print_encrypted_import_code "xtcp" "XTCP" "$code" "$passphrase"
   restart_service_if_present "$SELECTED_FRPC_SERVICE"
 }
 
@@ -2688,6 +2968,67 @@ import_xtcp_code_to_visitor() {
   ok "已导入 XTCP 访问端配置：$file"
 }
 
+export_xtcp_code_from_existing() {
+  create_dirs_and_user
+  local target_spec="${1:-}" file name secret server_addr server_port bind_addr bind_port visitor_name
+  local protocol keep_open fallback fallback_proxy fallback_visitor timeout disable_assisted server_user
+  local allow_users_raw allow_users passphrase payload code default_server_addr default_server_port
+  local fallback_secret matched_fallback
+  select_frpc_split_dir_for_write "$target_spec" || return 0
+  choose_proxy_config_file xtcp "$SELECTED_FRPC_SPLIT_DIR" || return 0
+  file="$SELECTED_CONFIG_FILE"
+  choose_proxy_name_in_file "$file" xtcp || return 0
+  name="$SELECTED_PROXY_NAME"
+  secret="$(extract_proxy_field "$file" xtcp "$name" secretKey)"
+  if [[ -z "$secret" ]]; then
+    warn "该 XTCP 配置缺少 secretKey，不能导出接入码：$file"
+    return 0
+  fi
+
+  default_server_addr="$(read_toml_value "$SELECTED_FRPC_CONFIG" "serverAddr")"
+  default_server_port="$(read_toml_value "$SELECTED_FRPC_CONFIG" "serverPort")"
+  [[ -n "$default_server_port" ]] || default_server_port="7000"
+  server_addr="$(ask_required "访问端连接的 frps 地址/IP/域名" "$default_server_addr")"
+  server_port="$(ask_port "访问端连接的 frps 端口" "$default_server_port")"
+  visitor_name="$(ask "访问端配置名 visitorName" "${name}_visitor")"
+  bind_addr="$(ask "访问端本地监听地址 bindAddr" "127.0.0.1")"
+  bind_port="$(ask_port "访问端本地监听端口 bindPort" "6000")"
+  protocol="$(ask "访问端 XTCP 底层协议 quic/kcp" "quic")"
+  case "$protocol" in quic|kcp) ;; *) warn "未知协议，回退 quic"; protocol="quic" ;; esac
+  keep_open="$(ask_yes_no_value "访问端是否 keepTunnelOpen" "Y")"
+  timeout="$(ask "fallbackTimeoutMs" "5000")"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=5000
+  disable_assisted="$(extract_proxy_field "$file" xtcp "$name" disableAssistedAddrs)"
+  [[ "$disable_assisted" == "true" ]] || disable_assisted="false"
+  allow_users_raw="$(extract_proxy_field "$file" xtcp "$name" allowUsers)"
+  allow_users="$(normalize_toml_array_csv "$allow_users_raw")"
+  server_user="$(ask "被访问端 frpc user serverUser，留空默认同访问端 user" "$(read_toml_value "$SELECTED_FRPC_CONFIG" "user")")"
+
+  fallback="false"
+  fallback_proxy="${name}_stcp"
+  fallback_visitor="${name}_stcp_fallback"
+  fallback_secret="$(extract_proxy_field "$file" stcp "$fallback_proxy" secretKey)"
+  if [[ "$fallback_secret" == "$secret" ]]; then
+    fallback="true"
+  else
+    matched_fallback="$(find_proxy_name_by_type_secret "$file" stcp "$secret" || true)"
+    if [[ -n "$matched_fallback" ]]; then
+      fallback="true"
+      fallback_proxy="$matched_fallback"
+      fallback_visitor="${matched_fallback}_fallback"
+    fi
+  fi
+
+  passphrase="$(ask "导入码加密口令，留空随机生成" "")"
+  [[ -z "$passphrase" ]] && passphrase="$(random_secret | cut -c1-20)"
+  payload="$(render_xtcp_payload "$server_addr" "$server_port" "$name" "$visitor_name" "$secret" "$bind_addr" "$bind_port" "$keep_open" "$fallback" "$fallback_proxy" "$fallback_visitor" "$timeout" "$protocol" "$disable_assisted" "$server_user" "$allow_users")"
+  code="$(encrypt_payload_code "IFRP-XTCP-V1" "$passphrase" "$payload")"
+
+  echo "来源：$file"
+  echo "配置：$name"
+  print_encrypted_import_code "xtcp" "XTCP" "$code" "$passphrase"
+}
+
 xtcp_config_check_menu() {
   create_dirs_and_user
   local target_spec="${1:-}" protocol disable_assisted timeout
@@ -2727,14 +3068,16 @@ xtcp_pair_menu() {
     menu_title "客户端 / XTCP"
     ui_menu_item 1 "创建被访问端" "生成加密导入码"
     ui_menu_item 2 "导入访问端" "粘贴加密导入码"
-    ui_menu_item 3 "检查/修复现有配置"
+    ui_menu_item 3 "复制接入码" "从已有配置导出"
+    ui_menu_item 4 "检查/修复"
     ui_menu_back
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
       1) create_xtcp_exposed_and_code "$target_spec"; pause ;;
       2) import_xtcp_code_to_visitor "" "" "false" "$target_spec"; pause ;;
-      3) xtcp_config_check_menu "$target_spec"; pause ;;
+      3) export_xtcp_code_from_existing "$target_spec"; pause ;;
+      4) xtcp_config_check_menu "$target_spec"; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -3659,9 +4002,9 @@ frpc_config_target_menu_direct() {
 
 render_frps_menu() {
   ui_menu_item 1 "安装/更新"
-  ui_menu_item 2 "服务管理" "启动并自启 / 停止 / 重启并自启"
-  ui_menu_item 3 "接入码" "导出给新 frpc"
-  ui_menu_item 4 "配置" "查看 / 编辑 / 校验"
+  ui_menu_item 2 "服务管理"
+  ui_menu_item 3 "接入码"
+  ui_menu_item 4 "配置"
   ui_menu_item 5 "日志"
   ui_menu_back
 }
@@ -3688,9 +4031,9 @@ frps_management_menu() {
 
 render_frpc_menu() {
   ui_menu_item 1 "安装/更新客户端"
-  ui_menu_item 2 "启动并自启/停止/重启并自启"
+  ui_menu_item 2 "服务管理"
   ui_menu_item 3 "客户端列表"
-  ui_menu_item 4 "配置文件" "查看 / 编辑 / 校验"
+  ui_menu_item 4 "配置文件"
   ui_menu_item 5 "日志"
   ui_menu_back
 }
@@ -4237,10 +4580,10 @@ uninstall_frp() {
 }
 
 render_main_menu() {
-  ui_menu_item 1 "服务端管理" "frps 安装 / 配置 / 接入码 / 日志"
-  ui_menu_item 2 "新增配置" "TCP / UDP / HTTP / STCP / XTCP / 导入码"
-  ui_menu_item 3 "客户端管理" "安装 / 启停 / 多客户端 / 配置 / 日志"
-  ui_menu_item 4 "工具/维护" "全局校验 / 摘要 / 日志修复 / 卸载"
+  ui_menu_item 1 "服务端管理"
+  ui_menu_item 2 "新增配置"
+  ui_menu_item 3 "客户端管理"
+  ui_menu_item 4 "工具/维护"
   ui_menu_back "退出"
 }
 
