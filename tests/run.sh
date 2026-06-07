@@ -721,6 +721,7 @@ test_import_targets_and_safe_failures() {
   require_function service_action
   require_function systemctl_enable_restart
   require_function restart_service_if_present
+  require_function activate_frpc_service_after_import
 
   local import_cmd
   import_cmd="$(render_one_click_import_command "frps" "IFRP-FRPC-V1:abc" "pass phrase")"
@@ -809,6 +810,17 @@ test_import_targets_and_safe_failures() {
   )"
   assert_contains '无法管理 frpc' <(printf '%s\n' "$missing_systemd_output") "enable restart reports missing systemctl"
   assert_not_contains '已启动并设置开机自启' <(printf '%s\n' "$missing_systemd_output") "enable restart does not claim success without systemctl"
+
+  local import_activate_output
+  import_activate_output="$(
+    (
+      has_cmd() { [[ "$1" == "systemctl" ]]; }
+      service_exists() { return 0; }
+      systemctl_enable_restart() { SERVICE_ACTION_STATUS=0; printf 'enable-restart:%s\n' "$1"; }
+      activate_frpc_service_after_import frpc true
+    ) 2>&1
+  )"
+  assert_contains 'enable-restart:frpc' <(printf '%s\n' "$import_activate_output") "strict import starts and enables frpc without prompt"
 
   local inactive_output
   inactive_output="$(
@@ -1073,7 +1085,7 @@ test_stcp_import_code_helpers() {
       confirm() { return 0; }
       verify_config() { printf 'verify:%s\n' "$2"; return 23; }
       write_systemd_service() { printf 'service-file:%s:%s\n' "$1" "$3"; }
-      restart_service_if_present() { printf 'restart:%s\n' "$1"; }
+      activate_frpc_service_after_import() { printf 'unexpected activate\n'; }
       import_stcp_code_to_visitor "$code" "passphrase" "true" "default"
     ) 2>&1
   )"; then
@@ -1082,10 +1094,37 @@ test_stcp_import_code_helpers() {
     strict_status=$?
   fi
   assert_eq "23" "$strict_status" "strict stcp import returns verify failure"
+  assert_contains "service-file:frpc:${TMP_DIR}/strict-stcp/frpc.toml" <(printf '%s\n' "$strict_output") "strict stcp import writes default service before verify"
   assert_contains "verify:${TMP_DIR}/strict-stcp/frpc.toml" <(printf '%s\n' "$strict_output") "strict stcp import verifies selected config"
   assert_contains 'serverAddr = "frps.example.com"' "${TMP_DIR}/strict-stcp/frpc.toml" "strict stcp import bootstraps main config"
   assert_contains "server-token" "${TMP_DIR}/strict-stcp/token" "strict stcp import writes token"
-  assert_not_contains 'restart:frpc' <(printf '%s\n' "$strict_output") "strict stcp import skips restart after verify failure"
+  assert_not_contains 'unexpected activate' <(printf '%s\n' "$strict_output") "strict stcp import skips activation after verify failure"
+
+  local existing_root existing_output
+  existing_root="${TMP_DIR}/existing-stcp"
+  existing_output="$(
+    (
+      CONFIG_DIR="${existing_root}/etc/frp"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${existing_root}/var/log/frp"
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      FRPC_STORE="${CONFIG_DIR}/frpc-store.json"
+      create_dirs_and_user() {
+        mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"
+        printf 'serverAddr = "frps.example.com"\nserverPort = 7000\nincludes = ["%s/*.toml"]\n' "$FRPC_CONF_DIR" > "$FRPC_CONFIG"
+      }
+      confirm() { return 0; }
+      verify_config() { printf 'verify:%s\n' "$2"; return 0; }
+      write_systemd_service() { printf 'service-file:%s:%s\n' "$1" "$3"; }
+      activate_frpc_service_after_import() { printf 'activate:%s:%s\n' "$1" "$2"; }
+      import_stcp_code_to_visitor "$code" "passphrase" "true" "default"
+    ) 2>&1
+  )"
+  assert_contains "service-file:frpc:${existing_root}/etc/frp/frpc.toml" <(printf '%s\n' "$existing_output") "stcp import writes service when main config already exists"
+  assert_contains 'activate:frpc:true' <(printf '%s\n' "$existing_output") "stcp import starts and enables existing default client"
 
   local instance_root="${TMP_DIR}/stcp-instance" instance_output
   instance_output="$(
@@ -1104,7 +1143,7 @@ test_stcp_import_code_helpers() {
       }
       write_frpc_template_service() { printf 'template-service\n'; }
       verify_config() { printf 'verify:%s\n' "$2"; return 0; }
-      restart_service_if_present() { printf 'restart:%s\n' "$1"; }
+      activate_frpc_service_after_import() { printf 'activate:%s:%s\n' "$1" "$2"; }
       import_stcp_code_to_visitor "$code" "passphrase" "true" "client:home"
     ) 2>&1
   )"
@@ -1112,7 +1151,7 @@ test_stcp_import_code_helpers() {
   assert_contains 'serverAddr = "frps.example.com"' "${instance_root}/etc/frp/clients/home/frpc.toml" "strict stcp import bootstraps client target"
   assert_contains 'server-token' "${instance_root}/etc/frp/clients/home/token" "strict stcp import writes client token"
   assert_contains 'type = "stcp"' "${instance_root}/etc/frp/clients/home/frpc.d/secret_ssh_visitor.toml" "strict stcp import writes client target visitor"
-  assert_contains 'restart:frpc@home' <(printf '%s\n' "$instance_output") "strict stcp import restarts client target"
+  assert_contains 'activate:frpc@home:true' <(printf '%s\n' "$instance_output") "strict stcp import starts and enables client target"
 
   local create_root create_output
   create_root="${TMP_DIR}/create-stcp"
@@ -1291,7 +1330,7 @@ test_xtcp_import_code_helpers() {
       confirm() { return 0; }
       verify_config() { printf 'verify:%s\n' "$2"; return 19; }
       write_systemd_service() { printf 'service-file:%s:%s\n' "$1" "$3"; }
-      restart_service_if_present() { printf 'restart:%s\n' "$1"; }
+      activate_frpc_service_after_import() { printf 'unexpected activate\n'; }
       import_xtcp_code_to_visitor "$code" "passphrase" "true" "default"
     ) 2>&1
   )"; then
@@ -1300,10 +1339,37 @@ test_xtcp_import_code_helpers() {
     strict_status=$?
   fi
   assert_eq "19" "$strict_status" "strict xtcp import returns verify failure"
+  assert_contains "service-file:frpc:${TMP_DIR}/strict-xtcp/frpc.toml" <(printf '%s\n' "$strict_output") "strict xtcp import writes default service before verify"
   assert_contains "verify:${TMP_DIR}/strict-xtcp/frpc.toml" <(printf '%s\n' "$strict_output") "strict xtcp import verifies selected config"
   assert_contains 'serverAddr = "frps.example.com"' "${TMP_DIR}/strict-xtcp/frpc.toml" "strict xtcp import bootstraps main config"
   assert_contains 'server-token' "${TMP_DIR}/strict-xtcp/token" "strict xtcp import writes token"
-  assert_not_contains 'restart:frpc' <(printf '%s\n' "$strict_output") "strict xtcp import skips restart after verify failure"
+  assert_not_contains 'unexpected activate' <(printf '%s\n' "$strict_output") "strict xtcp import skips activation after verify failure"
+
+  local existing_root existing_output
+  existing_root="${TMP_DIR}/existing-xtcp"
+  existing_output="$(
+    (
+      CONFIG_DIR="${existing_root}/etc/frp"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${existing_root}/var/log/frp"
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      FRPC_STORE="${CONFIG_DIR}/frpc-store.json"
+      create_dirs_and_user() {
+        mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"
+        printf 'serverAddr = "frps.example.com"\nserverPort = 7000\nincludes = ["%s/*.toml"]\n' "$FRPC_CONF_DIR" > "$FRPC_CONFIG"
+      }
+      confirm() { return 0; }
+      verify_config() { printf 'verify:%s\n' "$2"; return 0; }
+      write_systemd_service() { printf 'service-file:%s:%s\n' "$1" "$3"; }
+      activate_frpc_service_after_import() { printf 'activate:%s:%s\n' "$1" "$2"; }
+      import_xtcp_code_to_visitor "$code" "passphrase" "true" "default"
+    ) 2>&1
+  )"
+  assert_contains "service-file:frpc:${existing_root}/etc/frp/frpc.toml" <(printf '%s\n' "$existing_output") "xtcp import writes service when main config already exists"
+  assert_contains 'activate:frpc:true' <(printf '%s\n' "$existing_output") "xtcp import starts and enables existing default client"
 
   local instance_root="${TMP_DIR}/xtcp-instance" instance_output
   instance_output="$(
@@ -1322,7 +1388,7 @@ test_xtcp_import_code_helpers() {
       }
       write_frpc_template_service() { printf 'template-service\n'; }
       verify_config() { printf 'verify:%s\n' "$2"; return 0; }
-      restart_service_if_present() { printf 'restart:%s\n' "$1"; }
+      activate_frpc_service_after_import() { printf 'activate:%s:%s\n' "$1" "$2"; }
       import_xtcp_code_to_visitor "$code" "passphrase" "true" "client:home"
     ) 2>&1
   )"
@@ -1330,7 +1396,7 @@ test_xtcp_import_code_helpers() {
   assert_contains 'serverAddr = "frps.example.com"' "${instance_root}/etc/frp/clients/home/frpc.toml" "strict xtcp import bootstraps client target"
   assert_contains 'server-token' "${instance_root}/etc/frp/clients/home/token" "strict xtcp import writes client token"
   assert_contains 'type = "xtcp"' "${instance_root}/etc/frp/clients/home/frpc.d/p2p_ssh_visitor.toml" "strict xtcp import writes client target visitor"
-  assert_contains 'restart:frpc@home' <(printf '%s\n' "$instance_output") "strict xtcp import restarts client target"
+  assert_contains 'activate:frpc@home:true' <(printf '%s\n' "$instance_output") "strict xtcp import starts and enables client target"
 
   local old_visitor_file
   old_visitor_file="${TMP_DIR}/old-xtcp-visitor.toml"
@@ -1508,7 +1574,7 @@ test_frps_pairing_code_helpers() {
       confirm() { return 0; }
       verify_config() { printf 'verify:%s\n' "$2"; return 17; }
       write_systemd_service() { printf 'service-file:%s:%s\n' "$1" "$3"; }
-      restart_service_if_present() { printf 'restart:%s\n' "$1"; }
+      activate_frpc_service_after_import() { printf 'unexpected activate\n'; }
       import_frps_pairing_code "$code" "passphrase" "true" "default"
     ) 2>&1
   )"; then
@@ -1519,7 +1585,29 @@ test_frps_pairing_code_helpers() {
   assert_eq "17" "$import_status" "strict frps import returns verify failure"
   assert_contains "service-file:frpc:${TMP_DIR}/strict-frps/frpc.toml" <(printf '%s\n' "$import_output") "strict frps import writes default service before verify"
   assert_contains "verify:${TMP_DIR}/strict-frps/frpc.toml" <(printf '%s\n' "$import_output") "strict frps import verifies target config"
-  assert_not_contains 'restart:frpc' <(printf '%s\n' "$import_output") "strict frps import skips restart after verify failure"
+  assert_not_contains 'unexpected activate' <(printf '%s\n' "$import_output") "strict frps import skips activation after verify failure"
+
+  local success_root success_output
+  success_root="${TMP_DIR}/strict-frps-success"
+  success_output="$(
+    (
+      CONFIG_DIR="${success_root}/etc/frp"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${success_root}/var/log/frp"
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      FRPC_STORE="${CONFIG_DIR}/frpc-store.json"
+      create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; }
+      verify_config() { printf 'verify:%s\n' "$2"; return 0; }
+      write_systemd_service() { printf 'service-file:%s:%s\n' "$1" "$3"; }
+      activate_frpc_service_after_import() { printf 'activate:%s:%s\n' "$1" "$2"; }
+      import_frps_pairing_code "$code" "passphrase" "true" "default"
+    ) 2>&1
+  )"
+  assert_contains "service-file:frpc:${success_root}/etc/frp/frpc.toml" <(printf '%s\n' "$success_output") "strict frps import writes default service on success"
+  assert_contains 'activate:frpc:true' <(printf '%s\n' "$success_output") "strict frps import starts and enables default client"
 
   local instance_root="${TMP_DIR}/pair-instance" instance_output
   instance_output="$(
@@ -1535,11 +1623,12 @@ test_frps_pairing_code_helpers() {
       create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; }
       write_frpc_template_service() { printf 'template-service\n'; }
       verify_config() { printf 'verify:%s\n' "$2"; return 0; }
-      restart_service_if_present() { printf 'restart:%s\n' "$1"; }
+      activate_frpc_service_after_import() { printf 'activate:%s:%s\n' "$1" "$2"; }
       import_frps_pairing_code "$code" "passphrase" "true" "instance:home"
     ) 2>&1
   )"
   assert_contains 'template-service' <(printf '%s\n' "$instance_output") "strict frps import writes named template service"
+  assert_contains 'activate:frpc@home:true' <(printf '%s\n' "$instance_output") "strict frps import starts and enables named client"
   assert_contains "verify:${instance_root}/etc/frp/clients/home/frpc.toml" <(printf '%s\n' "$instance_output") "strict frps import verifies named instance config"
   assert_contains 'serverAddr = "frps.example.com"' "${instance_root}/etc/frp/clients/home/frpc.toml" "strict frps import writes named instance config"
   assert_contains 'server-token#frag' "${instance_root}/etc/frp/clients/home/token" "strict frps import writes named instance token"

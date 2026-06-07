@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r32}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r33}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -1043,6 +1043,28 @@ restart_service_if_present() {
     print_service_summary "$service"
   else
     warn "未重启 ${service}，新配置要等下次启动后生效。"
+  fi
+}
+
+activate_frpc_service_after_import() {
+  local service="$1" strict="${2:-false}" prompt
+  prompt="${3:-是否启动/重启 ${service} 并设置开机自启}"
+  if ! has_cmd systemctl; then
+    warn "当前系统没有 systemctl，无法启动 ${service}。"
+    return 0
+  fi
+  if ! service_exists "$service"; then
+    warn "未找到 ${service}.service；配置已写入，安装服务后再启动。"
+    return 0
+  fi
+  if [[ "$strict" == "true" ]]; then
+    systemctl_enable_restart "$service"
+    return 0
+  fi
+  if confirm "$prompt" "Y"; then
+    systemctl_enable_restart "$service"
+  else
+    warn "未启动 ${service}，新配置要等下次启动后生效。"
   fi
 }
 
@@ -2898,7 +2920,6 @@ bootstrap_selected_frpc_from_payload_if_needed() {
     "" \
     "$store_file" \
     "false"
-  write_frpc_service_for_target "$SELECTED_FRPC_SERVICE" "$SELECTED_FRPC_CONFIG"
   ok "已根据 ${title} 导入码生成 frpc 主配置：$SELECTED_FRPC_CONFIG"
 }
 
@@ -2979,13 +3000,14 @@ import_stcp_code_to_visitor() {
     return 0
   fi
   write_stcp_visitor_config_from_payload "$file" "$payload"
+  write_frpc_service_for_target "$SELECTED_FRPC_SERVICE" "$SELECTED_FRPC_CONFIG"
   verify_status=0
   verify_config_before_restart "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG" || verify_status=$?
   if (( verify_status != 0 )); then
     [[ "$strict_verify" == "true" ]] && return "$verify_status"
     return 0
   fi
-  restart_service_if_present "$SELECTED_FRPC_SERVICE"
+  activate_frpc_service_after_import "$SELECTED_FRPC_SERVICE" "$strict_verify"
   ok "已导入 STCP 访问端配置：$file"
 }
 
@@ -3131,13 +3153,14 @@ import_xtcp_code_to_visitor() {
     return 0
   fi
   write_xtcp_visitor_config_from_payload "$file" "$payload"
+  write_frpc_service_for_target "$SELECTED_FRPC_SERVICE" "$SELECTED_FRPC_CONFIG"
   verify_status=0
   verify_config_before_restart "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG" || verify_status=$?
   if (( verify_status != 0 )); then
     [[ "$strict_verify" == "true" ]] && return "$verify_status"
     return 0
   fi
-  restart_service_if_present "$SELECTED_FRPC_SERVICE"
+  activate_frpc_service_after_import "$SELECTED_FRPC_SERVICE" "$strict_verify"
   ok "已导入 XTCP 访问端配置：$file"
 }
 
@@ -3969,7 +3992,7 @@ import_frps_pairing_code() {
     [[ "$strict_verify" == "true" ]] && return "$verify_status"
     return 0
   fi
-  restart_service_if_present "$service"
+  activate_frpc_service_after_import "$service" "$strict_verify"
   ok "已导入 frps 接入配置：$config"
 }
 
