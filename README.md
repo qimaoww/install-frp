@@ -48,7 +48,7 @@ sudo bash frp.sh
 菜单顶部只显示运行概况；版本和配置细节在子菜单和安装摘要里查看：
 
 ```text
-frp 管理脚本 2026.06.07-r27
+frp 管理脚本 2026.06.07-r29
 状态：服务端:未运行 | 客户端:2个/运行1
 ```
 
@@ -60,7 +60,7 @@ frp 管理脚本 2026.06.07-r27
 0) 退出
 ```
 
-新增 TCP/UDP/HTTP/XTCP 可以走主菜单“新增配置”，也可以先进入某个客户端的“配置文件”页面后直接新增到当前客户端。安装、启停、日志、配置文件、客户端列表走“客户端管理”。更新二进制、全局校验、安装摘要、GitHub 下载代理、文件日志修复和卸载放在“工具/维护”里。
+新增 TCP/UDP/HTTP/STCP/XTCP 可以走主菜单“新增配置”，也可以先进入某个客户端的“配置文件”页面后直接新增到当前客户端。安装、启停、日志、配置文件、客户端列表走“客户端管理”。更新二进制、全局校验、安装摘要、GitHub 下载代理、文件日志修复和卸载放在“工具/维护”里。
 
 ---
 
@@ -104,9 +104,10 @@ bash <(curl -fsSL 'https://raw.githubusercontent.com/qimaoww/install-frp/main/fr
 2) 新增 UDP 配置
 3) 新增 HTTP 配置
 4) 新增 HTTPS 配置
-5) 新增 XTCP 配置
-6) 导入接入码
-7) 更多高级配置
+5) STCP 接入码
+6) XTCP 接入码
+7) 导入 frps 接入码
+8) 更多高级配置
 0) 返回
 ```
 
@@ -127,7 +128,7 @@ bash <(curl -fsSL 'https://raw.githubusercontent.com/qimaoww/install-frp/main/fr
 
 ```text
 1) 安装/更新客户端
-2) 启动/停止/重启
+2) 启动并自启/停止/重启并自启
 3) 客户端列表
 4) 配置文件
 5) 日志
@@ -201,11 +202,12 @@ bash frp.sh --service frpc@home restart
 2) 新增配置
 3) 编辑主配置
 4) 编辑拆分配置
-5) 校验配置
+5) 删除拆分配置
+6) 校验配置
 0) 返回
 ```
 
-在这个页面选择“新增配置”时，脚本会直接写入当前客户端的拆分目录，不会再重复询问写入目标。
+在这个页面选择“新增配置”时，脚本会直接写入当前客户端的拆分目录，不会再重复询问写入目标。选择“删除拆分配置”会列出当前客户端的 `frpc.d/*.toml`，确认后先备份再删除、校验主配置，并提示重启对应客户端。
 
 编辑器选择顺序：
 
@@ -224,15 +226,36 @@ frpc verify -c /etc/frp/frpc.toml
 
 ---
 
-## XTCP / STCP 加密导入码
+## STCP / XTCP 加密导入码
 
-XTCP 需要两端 `frpc` 配对：被访问端创建 `[[proxies]]`，访问端创建 `[[visitors]]`。脚本提供加密导入码，减少手工复制 `serverName`、`secretKey`、fallback 等字段出错。
+STCP 和 XTCP 都需要两端 `frpc` 配对：被访问端创建 `[[proxies]]`，访问端创建 `[[visitors]]`。脚本提供加密导入码，减少手工复制 `serverName`、`secretKey`、fallback 等字段出错。
+
+### STCP 接入码
+
+STCP 适合不想在服务端暴露业务端口的安全 TCP 访问。进入 `新增配置 -> STCP 接入码`：
+
+```text
+1) 创建被访问端
+2) 导入访问端
+0) 返回
+```
+
+被访问端会写入 `[[proxies]] type = "stcp"`，并输出加密导入码、解密码和一键导入命令：
+
+```text
+IFRP-STCP-V1:<加密内容>
+bash <(curl -fsSL 'https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh') --import-stcp-code 'IFRP-STCP-V1:...' '解密码' default
+```
+
+访问端执行一键命令后会写入 `[[visitors]] type = "stcp"`。两端会使用同一个 `secretKey`，访问端的 `serverName` 指向被访问端的 `proxyName`。
+
+### XTCP 接入码
 
 菜单：
 
 ```text
-1) 创建被访问端 XTCP 配置并生成加密导入码
-2) 粘贴加密导入码生成访问端配置
+1) 创建被访问端
+2) 导入访问端
 3) 检查/修复现有配置
 0) 返回
 ```

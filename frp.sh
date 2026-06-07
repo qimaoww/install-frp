@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r27}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r29}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -302,6 +302,7 @@ render_one_click_import_command() {
   local kind="$1" code="$2" passphrase="$3" target="${4:-default}" flag
   case "$kind" in
     frps) flag="--import-frps-code" ;;
+    stcp) flag="--import-stcp-code" ;;
     xtcp) flag="--import-xtcp-code" ;;
     *) fatal "未知的一键导入类型：$kind" ;;
   esac
@@ -1165,12 +1166,12 @@ choose_existing_frpc_client_name() {
 
 render_no_frpc_instances_hint() {
   printf '没有其它客户端。\n'
-  printf '下一步：客户端管理 -> 客户端列表 -> 新建/重配客户端，或 新增配置 -> 导入接入码。\n'
+  printf '下一步：客户端管理 -> 客户端列表 -> 新建/重配客户端，或 新增配置 -> 导入 frps 接入码。\n'
 }
 
 render_no_frpc_clients_hint() {
   printf '没有可管理的 frpc 客户端。\n'
-  printf '下一步：客户端管理 -> 客户端列表 -> 新建/重配客户端，或 新增配置 -> 导入接入码。\n'
+  printf '下一步：客户端管理 -> 客户端列表 -> 新建/重配客户端，或 新增配置 -> 导入 frps 接入码。\n'
 }
 
 list_frpc_client_targets() {
@@ -1933,6 +1934,70 @@ EOF_VISITOR
   [[ -n "$server_user" ]] && echo "serverUser = \"$(toml_escape "$server_user")\"" >> "$file"
 }
 
+render_stcp_payload() {
+  local proxy_name="$1" visitor_name="$2" secret="$3" bind_addr="$4" bind_port="$5"
+  local server_user="${6:-}" allow_users="${7:-}"
+  cat <<EOF_STCP_PAYLOAD
+format = "install-frp-stcp-v1"
+proxyName = "$(toml_escape "$proxy_name")"
+visitorName = "$(toml_escape "$visitor_name")"
+secretKey = "$(toml_escape "$secret")"
+bindAddr = "$(toml_escape "$bind_addr")"
+bindPort = ${bind_port}
+serverUser = "$(toml_escape "$server_user")"
+allowUsers = "$(toml_escape "$allow_users")"
+EOF_STCP_PAYLOAD
+}
+
+parse_stcp_payload_value() {
+  parse_payload_value "$1" "$2"
+}
+
+write_stcp_exposed_config() {
+  local file="$1" proxy_name="$2" secret="$3" local_ip="$4" local_port="$5" allow_users="${6:-}"
+  mkdir -p "${file%/*}"
+  cat > "$file" <<EOF_STCP_EXPOSED
+[[proxies]]
+name = "$(toml_escape "$proxy_name")"
+type = "stcp"
+secretKey = "$(toml_escape "$secret")"
+localIP = "$(toml_escape "$local_ip")"
+localPort = ${local_port}
+EOF_STCP_EXPOSED
+  [[ -n "$allow_users" ]] && echo "allowUsers = $(toml_array_from_csv "$allow_users")" >> "$file"
+  chown root:"$FRP_USER" "$file" 2>/dev/null || true
+  chmod 640 "$file" 2>/dev/null || true
+}
+
+write_stcp_visitor_config_from_payload() {
+  local file="$1" payload="$2"
+  local format server_name visitor_name secret bind_addr bind_port server_user
+  format="$(parse_stcp_payload_value "$payload" format)"
+  [[ "$format" == "install-frp-stcp-v1" ]] || fatal "STCP 导入码内容格式不正确。"
+  server_name="$(parse_stcp_payload_value "$payload" proxyName)"
+  visitor_name="$(parse_stcp_payload_value "$payload" visitorName)"
+  secret="$(parse_stcp_payload_value "$payload" secretKey)"
+  bind_addr="$(parse_stcp_payload_value "$payload" bindAddr)"
+  bind_port="$(parse_stcp_payload_value "$payload" bindPort)"
+  server_user="$(parse_stcp_payload_value "$payload" serverUser)"
+  [[ -n "$server_name" && -n "$visitor_name" && -n "$secret" && -n "$bind_port" ]] || fatal "STCP 导入码缺少必要字段。"
+  [[ -n "$bind_addr" ]] || bind_addr="127.0.0.1"
+
+  mkdir -p "${file%/*}"
+  cat > "$file" <<EOF_STCP_VISITOR
+[[visitors]]
+name = "$(toml_escape "$visitor_name")"
+type = "stcp"
+serverName = "$(toml_escape "$server_name")"
+secretKey = "$(toml_escape "$secret")"
+bindAddr = "$(toml_escape "$bind_addr")"
+bindPort = ${bind_port}
+EOF_STCP_VISITOR
+  [[ -n "$server_user" ]] && echo "serverUser = \"$(toml_escape "$server_user")\"" >> "$file"
+  chown root:"$FRP_USER" "$file" 2>/dev/null || true
+  chmod 640 "$file" 2>/dev/null || true
+}
+
 render_xtcp_payload() {
   local server_addr="$1" server_port="$2" proxy_name="$3" visitor_name="$4" secret="$5"
   local bind_addr="$6" bind_port="$7" keep_tunnel_open="$8" fallback="$9"
@@ -2411,6 +2476,114 @@ selected_frpc_target_spec() {
       return 1
       ;;
   esac
+}
+
+create_stcp_exposed_and_code() {
+  create_dirs_and_user
+  local target_spec="${1:-}"
+  local name secret local_ip local_port bind_addr bind_port server_user allow_users passphrase payload code safe_name file
+  select_frpc_split_dir_for_write "$target_spec" || return 0
+  name="$(ask_required "STCP 配置名 proxyName" "secret_ssh")"
+  secret="$(ask "secretKey，留空随机生成" "")"
+  [[ -z "$secret" ]] && secret="$(random_secret)"
+  local_ip="$(ask "被访问本地服务 IP localIP" "127.0.0.1")"
+  local_port="$(ask_port "被访问本地服务端口 localPort" "22")"
+  bind_addr="$(ask "访问端本地监听地址 bindAddr" "127.0.0.1")"
+  bind_port="$(ask_port "访问端本地监听端口 bindPort" "6000")"
+  server_user="$(ask "被访问端 frpc user serverUser，留空默认同访问端 user" "")"
+  allow_users="$(ask "allowUsers，留空默认只允许同 user；允许所有填 *" "")"
+
+  safe_name="$(safe_filename "$name")"
+  file="${SELECTED_FRPC_SPLIT_DIR}/${safe_name}.toml"
+  if [[ -f "$file" ]]; then
+    if confirm "配置 ${file} 已存在，是否覆盖" "n"; then
+      backup_file "$file" >/dev/null || true
+    else
+      warn "已取消覆盖：$file"
+      return 0
+    fi
+  fi
+  write_stcp_exposed_config "$file" "$name" "$secret" "$local_ip" "$local_port" "$allow_users"
+  verify_config_before_restart "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG" || return 0
+
+  payload="$(render_stcp_payload "$name" "${name}_visitor" "$secret" "$bind_addr" "$bind_port" "$server_user" "$allow_users")"
+  passphrase="$(ask "导入码加密口令，留空随机生成" "")"
+  [[ -z "$passphrase" ]] && passphrase="$(random_secret | cut -c1-20)"
+  code="$(encrypt_payload_code "IFRP-STCP-V1" "$passphrase" "$payload")"
+
+  warn "下面的导入码和口令合在一起等同于 secretKey，请勿公开。"
+  echo
+  echo "========== STCP 加密导入码 =========="
+  echo "$code"
+  echo "========== 解密码 =========="
+  echo "$passphrase"
+  echo "========== 一键导入命令（含解密码） =========="
+  render_one_click_import_command "stcp" "$code" "$passphrase"
+  echo "===================================="
+  restart_service_if_present "$SELECTED_FRPC_SERVICE"
+}
+
+import_stcp_code_to_visitor() {
+  create_dirs_and_user
+  local code passphrase strict_verify target_spec payload visitor_name safe_name file verify_status
+  code="${1:-}"
+  passphrase="${2:-}"
+  strict_verify="${3:-false}"
+  target_spec="${4:-}"
+  if ! select_frpc_split_dir_for_write "$target_spec" "$strict_verify"; then
+    [[ "$strict_verify" == "true" ]] && return 1
+    return 0
+  fi
+  if [[ -z "$code" ]]; then
+    warn "请粘贴 STCP 加密导入码，格式为 IFRP-STCP-V1:..."
+    code="$(ask_required "STCP 导入码" "")"
+  fi
+  [[ -n "$passphrase" ]] || passphrase="$(ask_required "解密码" "")"
+  if ! payload="$(decrypt_payload_code "IFRP-STCP-V1" "$passphrase" "$code" 2>/dev/null)"; then
+    warn "解密失败：STCP 导入码或解密码不正确。"
+    [[ "$strict_verify" == "true" ]] && return 1
+    return 0
+  fi
+  visitor_name="$(parse_stcp_payload_value "$payload" visitorName)"
+  [[ -n "$visitor_name" ]] || fatal "导入码缺少 visitorName。"
+  safe_name="$(safe_filename "$visitor_name")"
+  file="${SELECTED_FRPC_SPLIT_DIR}/${safe_name}.toml"
+  if [[ -f "$file" ]]; then
+    if confirm "配置 ${file} 已存在，是否覆盖" "n"; then
+      backup_file "$file" >/dev/null || true
+    else
+      warn "已取消覆盖：$file"
+      [[ "$strict_verify" == "true" ]] && return 1
+      return 0
+    fi
+  fi
+  write_stcp_visitor_config_from_payload "$file" "$payload"
+  verify_status=0
+  verify_config_before_restart "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG" || verify_status=$?
+  if (( verify_status != 0 )); then
+    [[ "$strict_verify" == "true" ]] && return "$verify_status"
+    return 0
+  fi
+  restart_service_if_present "$SELECTED_FRPC_SERVICE"
+  ok "已导入 STCP 访问端配置：$file"
+}
+
+stcp_pair_menu() {
+  local target_spec="${1:-}"
+  while true; do
+    menu_title "客户端 / STCP"
+    ui_menu_item 1 "创建被访问端" "生成加密导入码"
+    ui_menu_item 2 "导入访问端" "粘贴加密导入码"
+    ui_menu_back
+    local choice
+    choice="$(ask "请选择" "1")"
+    case "$choice" in
+      1) create_stcp_exposed_and_code "$target_spec"; pause ;;
+      2) import_stcp_code_to_visitor "" "" "false" "$target_spec"; pause ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择"; pause ;;
+    esac
+  done
 }
 
 create_xtcp_exposed_and_code() {
@@ -3071,9 +3244,10 @@ add_proxy_wizard() {
     ui_menu_item 2 "新增 UDP 配置" "本地 UDP -> 服务端 UDP"
     ui_menu_item 3 "新增 HTTP 配置" "域名访问 Web"
     ui_menu_item 4 "新增 HTTPS 配置" "域名访问 Web"
-    ui_menu_item 5 "新增 XTCP 配置" "打洞 / 导入码"
-    ui_menu_item 6 "导入接入码" "从服务端复制"
-    ui_menu_item 7 "更多高级配置"
+    ui_menu_item 5 "STCP 接入码" "安全 TCP"
+    ui_menu_item 6 "XTCP 接入码" "打洞 / fallback"
+    ui_menu_item 7 "导入 frps 接入码" "从服务端复制"
+    ui_menu_item 8 "更多高级配置"
     ui_menu_back
     local choice
     choice="$(ask "请选择" "1")"
@@ -3082,14 +3256,21 @@ add_proxy_wizard() {
       2|udp) run_frpc_write_action "$target_locked" add_proxy_by_type udp; pause ;;
       3|http) run_frpc_write_action "$target_locked" add_proxy_by_type http; pause ;;
       4|https) run_frpc_write_action "$target_locked" add_proxy_by_type https; pause ;;
-      5|xtcp)
+      5|stcp)
+        target_spec=""
+        if [[ "$target_locked" == "true" ]]; then
+          target_spec="$(selected_frpc_target_spec)" || { pause; continue; }
+        fi
+        stcp_pair_menu "$target_spec"
+        ;;
+      6|xtcp)
         target_spec=""
         if [[ "$target_locked" == "true" ]]; then
           target_spec="$(selected_frpc_target_spec)" || { pause; continue; }
         fi
         xtcp_pair_menu "$target_spec"
         ;;
-      6|import|code)
+      7|import|code)
         if [[ "$target_locked" == "true" ]]; then
           target_spec="$(selected_frpc_target_spec)" || { pause; continue; }
           import_frps_pairing_code "" "" "false" "$target_spec"
@@ -3098,7 +3279,7 @@ add_proxy_wizard() {
         fi
         pause
         ;;
-      7|more) add_more_config_menu "$target_locked" ;;
+      8|more) add_more_config_menu "$target_locked" ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -3377,7 +3558,7 @@ frpc_config_menu() {
         name="$SELECTED_FRPC_CLIENT_NAME"
         if [[ ! -f "$(instance_frpc_config "$name")" ]]; then
           warn "客户端不存在或未完成配置：$(instance_frpc_config "$name")"
-          warn "上面是当前已有客户端；要创建新客户端，请到 客户端管理 -> 客户端列表 -> 新建/重配客户端，或 新增配置 -> 导入接入码。"
+          warn "上面是当前已有客户端；要创建新客户端，请到 客户端管理 -> 客户端列表 -> 新建/重配客户端，或 新增配置 -> 导入 frps 接入码。"
           pause
           continue
         fi
@@ -3454,7 +3635,8 @@ frpc_config_target_menu_direct() {
     ui_menu_item 2 "新增配置"
     ui_menu_item 3 "编辑主配置"
     ui_menu_item 4 "编辑拆分配置"
-    ui_menu_item 5 "校验配置"
+    ui_menu_item 5 "删除拆分配置"
+    ui_menu_item 6 "校验配置"
     ui_menu_back
     local choice
     choice="$(ask "请选择" "1")"
@@ -3467,7 +3649,8 @@ frpc_config_target_menu_direct() {
         edit_config_file "$SELECTED_CONFIG_FILE" "${SELECTED_FRPC_LABEL} 拆分配置" "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_SERVICE"
         pause
         ;;
-      5|verify) verify_config_interactive "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"; pause ;;
+      5|delete-split|delete) delete_frpc_split_config; pause ;;
+      6|verify) verify_config_interactive "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -3476,7 +3659,7 @@ frpc_config_target_menu_direct() {
 
 render_frps_menu() {
   ui_menu_item 1 "安装/更新"
-  ui_menu_item 2 "服务管理" "启动 / 停止 / 重启 / 自启"
+  ui_menu_item 2 "服务管理" "启动并自启 / 停止 / 重启并自启"
   ui_menu_item 3 "接入码" "导出给新 frpc"
   ui_menu_item 4 "配置" "查看 / 编辑 / 校验"
   ui_menu_item 5 "日志"
@@ -3505,7 +3688,7 @@ frps_management_menu() {
 
 render_frpc_menu() {
   ui_menu_item 1 "安装/更新客户端"
-  ui_menu_item 2 "启动/停止/重启"
+  ui_menu_item 2 "启动并自启/停止/重启并自启"
   ui_menu_item 3 "客户端列表"
   ui_menu_item 4 "配置文件" "查看 / 编辑 / 校验"
   ui_menu_item 5 "日志"
@@ -3563,16 +3746,16 @@ manage_single_service_menu() {
     warn "当前系统没有 systemctl，无法管理 ${svc}。"
     return 0
   fi
-  menu_title "${svc} 启动/停止/重启"
+  menu_title "${svc} 服务管理"
   print_service_summary "$svc"
   if ! service_exists "$svc"; then
     warn "请先安装/写入 ${svc}.service。"
     return 0
   fi
   ui_menu_item 1 "状态"
-  ui_menu_item 2 "启动"
+  ui_menu_item 2 "启动并自启"
   ui_menu_item 3 "停止"
-  ui_menu_item 4 "重启"
+  ui_menu_item 4 "重启并自启"
   ui_menu_item 5 "日志" "systemd"
   ui_menu_item 6 "开机自启"
   ui_menu_item 7 "取消自启"
@@ -3580,9 +3763,9 @@ manage_single_service_menu() {
   action="$(ask "请选择" "1")"
   case "$action" in
     1|status) service_action "$svc" status ;;
-    2|start) service_action "$svc" start ;;
+    2|start) systemctl_enable_restart "$svc" ;;
     3|stop) service_action "$svc" stop ;;
-    4|restart) service_action "$svc" restart ;;
+    4|restart) systemctl_enable_restart "$svc" ;;
     5|logs) service_action "$svc" logs ;;
     6|enable) service_action "$svc" enable ;;
     7|disable) service_action "$svc" disable ;;
@@ -3796,6 +3979,28 @@ choose_frpc_split_config() {
   fi
   warn "无效选择。"
   return 1
+}
+
+delete_frpc_split_config() {
+  local file backup
+  choose_frpc_split_config "$SELECTED_FRPC_SPLIT_DIR" || return 0
+  file="$SELECTED_CONFIG_FILE"
+  [[ -f "$file" ]] || { warn "配置文件不存在：$file"; return 0; }
+  warn "即将删除拆分配置：$file"
+  warn "只删除这一个 frpc.d 配置文件，不删除客户端主配置。"
+  if ! confirm "确认删除" "n"; then
+    warn "已取消删除。"
+    return 0
+  fi
+  backup="$(backup_file "$file" || true)"
+  rm -f "$file"
+  if [[ -n "$backup" ]]; then
+    ok "已删除：$file（备份：$backup）"
+  else
+    ok "已删除：$file"
+  fi
+  verify_config_before_restart "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG" || return 0
+  restart_service_if_present "$SELECTED_FRPC_SERVICE"
 }
 
 show_log_file() {
@@ -4033,7 +4238,7 @@ uninstall_frp() {
 
 render_main_menu() {
   ui_menu_item 1 "服务端管理" "frps 安装 / 配置 / 接入码 / 日志"
-  ui_menu_item 2 "新增配置" "TCP / UDP / HTTP / XTCP / 导入码"
+  ui_menu_item 2 "新增配置" "TCP / UDP / HTTP / STCP / XTCP / 导入码"
   ui_menu_item 3 "客户端管理" "安装 / 启停 / 多客户端 / 配置 / 日志"
   ui_menu_item 4 "工具/维护" "全局校验 / 摘要 / 日志修复 / 卸载"
   ui_menu_back "退出"
@@ -4063,6 +4268,7 @@ print_usage() {
 用法：
   bash frp.sh
   bash frp.sh --import-frps-code <接入码> <解密码> [default|client:<name>]
+  bash frp.sh --import-stcp-code <导入码> <解密码> [default|client:<name>]
   bash frp.sh --import-xtcp-code <导入码> <解密码> [default|client:<name>]
   bash frp.sh --xtcp-summary <配置文件或目录>
   bash frp.sh --repair-xtcp <配置文件或目录> [quic|kcp] [fallbackTimeoutMs]
@@ -4077,6 +4283,11 @@ run_cli() {
       need_root
       load_installer_config
       import_frps_pairing_code "${2:-}" "${3:-}" "true" "${4:-}"
+      ;;
+    --import-stcp-code)
+      need_root
+      load_installer_config
+      import_stcp_code_to_visitor "${2:-}" "${3:-}" "true" "${4:-}"
       ;;
     --import-xtcp-code)
       need_root
@@ -4100,8 +4311,14 @@ run_cli() {
       action="${3:-status}"
       [[ -n "$service" ]] || fatal "缺少服务名。"
       case "$action" in
-        status|start|stop|restart|enable|disable)
+        status|stop|enable|disable)
           service_action "$service" "$action"
+          if [[ "$action" != "status" && "${SERVICE_ACTION_STATUS:-0}" != "0" ]]; then
+            return "$SERVICE_ACTION_STATUS"
+          fi
+          ;;
+        start|restart)
+          systemctl_enable_restart "$service"
           if [[ "$action" != "status" && "${SERVICE_ACTION_STATUS:-0}" != "0" ]]; then
             return "$SERVICE_ACTION_STATUS"
           fi

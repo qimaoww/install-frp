@@ -472,6 +472,7 @@ test_frpc_proxy_target_helpers() {
   require_function add_more_config_menu
   require_function add_config_menu
   require_function add_proxy_wizard
+  require_function delete_frpc_split_config
 
   local frps_menu_body frpc_target_body add_proxy_body more_config_body manage_presets_body write_body preset_body paste_body typed_body manual_body
   frps_menu_body="$(declare -f frps_config_menu)"
@@ -488,12 +489,15 @@ test_frpc_proxy_target_helpers() {
   assert_contains 'verify_config_interactive "${INSTALL_DIR}/frps" "$FRPS_CONFIG"' <(printf '%s\n' "$frps_menu_body") "frps verify menu catches verify failure"
   assert_contains 'verify_config_interactive "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"' <(printf '%s\n' "$frpc_target_body") "frpc verify menu catches verify failure"
   assert_contains 'ui_menu_item 2 "新增配置"' <(printf '%s\n' "$frpc_target_body") "selected client config menu exposes add config entry"
+  assert_contains 'ui_menu_item 5 "删除拆分配置"' <(printf '%s\n' "$frpc_target_body") "selected client config menu exposes delete config entry"
   assert_contains 'add_proxy_wizard "true"' <(printf '%s\n' "$frpc_target_body") "selected client add config reuses current target"
+  assert_contains 'delete_frpc_split_config' <(printf '%s\n' "$frpc_target_body") "selected client config menu deletes split config"
   assert_not_contains 'select_frpc_split_dir_for_write || return 0' <(printf '%s\n' "$add_proxy_body") "proxy wizard does not choose target on entry"
   assert_contains 'ui_menu_item 1 "新增 TCP 配置"' <(printf '%s\n' "$add_proxy_body") "new config menu exposes tcp config entry"
   assert_contains 'run_frpc_write_action "$target_locked" add_proxy_by_type tcp' <(printf '%s\n' "$add_proxy_body") "tcp config entry writes through target runner"
   assert_contains 'run_frpc_write_action "$target_locked" add_proxy_by_type udp' <(printf '%s\n' "$add_proxy_body") "udp config entry writes through target runner"
   assert_contains 'run_frpc_write_action "$target_locked" add_proxy_by_type http' <(printf '%s\n' "$add_proxy_body") "http config entry writes through target runner"
+  assert_contains 'stcp_pair_menu' <(printf '%s\n' "$add_proxy_body") "new config menu exposes stcp code entry"
   assert_contains 'xtcp_pair_menu' <(printf '%s\n' "$add_proxy_body") "new config menu exposes xtcp config entry"
   assert_contains 'import_frps_pairing_code' <(printf '%s\n' "$add_proxy_body") "new config menu exposes pairing import"
   assert_contains 'run_frpc_write_action "$target_locked" apply_custom_preset' <(printf '%s\n' "$more_config_body") "more config menu writes through target runner"
@@ -573,6 +577,30 @@ test_frpc_proxy_target_helpers() {
   assert_contains 'writer:tcp' <(printf '%s\n' "$locked_output") "locked selected client writer runs directly"
   assert_not_contains 'unexpected target prompt' <(printf '%s\n' "$locked_output") "locked selected client writer does not ask target again"
 
+  local locked_stcp_output locked_stcp_count
+  locked_stcp_count="${TMP_DIR}/locked-stcp-ask-count"
+  printf '0' > "$locked_stcp_count"
+  locked_stcp_output="$(
+    (
+      SELECTED_FRPC_SERVICE=frpc@home
+      create_dirs_and_user() { :; }
+      pause() { :; }
+      ask() {
+        local ask_count
+        ask_count="$(cat "$locked_stcp_count")"
+        ask_count=$((ask_count + 1))
+        printf '%s' "$ask_count" > "$locked_stcp_count"
+        case "$ask_count" in
+          1) printf '5' ;;
+          *) printf '0' ;;
+        esac
+      }
+      stcp_pair_menu() { printf 'stcp-target:%s\n' "$1"; }
+      add_proxy_wizard "true"
+    ) 2>&1
+  )"
+  assert_contains 'stcp-target:client:home' <(printf '%s\n' "$locked_stcp_output") "locked selected client stcp menu receives current target"
+
   local locked_xtcp_output locked_xtcp_count
   locked_xtcp_count="${TMP_DIR}/locked-xtcp-ask-count"
   printf '0' > "$locked_xtcp_count"
@@ -587,7 +615,7 @@ test_frpc_proxy_target_helpers() {
         ask_count=$((ask_count + 1))
         printf '%s' "$ask_count" > "$locked_xtcp_count"
         case "$ask_count" in
-          1) printf '5' ;;
+          1) printf '6' ;;
           *) printf '0' ;;
         esac
       }
@@ -611,7 +639,7 @@ test_frpc_proxy_target_helpers() {
         ask_count=$((ask_count + 1))
         printf '%s' "$ask_count" > "$locked_import_count"
         case "$ask_count" in
-          1) printf '6' ;;
+          1) printf '7' ;;
           *) printf '0' ;;
         esac
       }
@@ -652,11 +680,39 @@ test_frpc_proxy_target_helpers() {
   assert_contains 'remotePort = 6000' "$tcp_file" "tcp proxy entry writes remote port"
   assert_contains "verify:${tcp_root}/frpc.toml" <(printf '%s\n' "$tcp_output") "tcp proxy entry verifies selected client"
   assert_contains 'restart:frpc@tcp' <(printf '%s\n' "$tcp_output") "tcp proxy entry restarts selected client"
+
+  local delete_root delete_output delete_file keep_file
+  delete_root="${TMP_DIR}/delete-split"
+  delete_file="${delete_root}/frpc.d/a.toml"
+  keep_file="${delete_root}/frpc.d/b.toml"
+  mkdir -p "${delete_root}/frpc.d"
+  printf 'serverPort = 7000\n' > "${delete_root}/frpc.toml"
+  printf '[[proxies]]\nname = "a"\ntype = "tcp"\n' > "$delete_file"
+  printf '[[proxies]]\nname = "b"\ntype = "tcp"\n' > "$keep_file"
+  delete_output="$(
+    (
+      SELECTED_FRPC_CONFIG="${delete_root}/frpc.toml"
+      SELECTED_FRPC_SPLIT_DIR="${delete_root}/frpc.d"
+      SELECTED_FRPC_SERVICE="frpc@delete"
+      ask() { printf '1'; }
+      confirm() { return 0; }
+      verify_config_before_restart() { printf 'verify:%s\n' "$2"; return 0; }
+      restart_service_if_present() { printf 'restart:%s\n' "$1"; }
+      delete_frpc_split_config
+    ) 2>&1
+  )"
+  [[ ! -f "$delete_file" ]] || fail "delete split config should remove selected file"
+  [[ -f "$keep_file" ]] || fail "delete split config should keep unselected file"
+  find "${delete_root}/frpc.d" -name 'a.toml.bak.*' -print -quit | grep -q . || fail "delete split config should create backup"
+  pass "delete split config removes selected file and keeps backup"
+  assert_contains "verify:${delete_root}/frpc.toml" <(printf '%s\n' "$delete_output") "delete split config verifies selected main config"
+  assert_contains 'restart:frpc@delete' <(printf '%s\n' "$delete_output") "delete split config restarts selected service"
 }
 
 test_import_targets_and_safe_failures() {
   require_function render_one_click_import_command
   require_function import_frps_pairing_code
+  require_function import_stcp_code_to_visitor
   require_function import_xtcp_code_to_visitor
   require_function service_action
   require_function systemctl_enable_restart
@@ -684,6 +740,15 @@ test_import_targets_and_safe_failures() {
   fi
   assert_eq "1" "$bad_status" "strict xtcp import decode failure returns non-zero"
   assert_contains '解密失败' <(printf '%s\n' "$bad_output") "strict xtcp import explains decode failure"
+
+  bad_status=0
+  if bad_output="$(import_stcp_code_to_visitor "bad-code" "bad-pass" "true" "default" 2>&1)"; then
+    fail "strict stcp import decode failure should return non-zero"
+  else
+    bad_status=$?
+  fi
+  assert_eq "1" "$bad_status" "strict stcp import decode failure returns non-zero"
+  assert_contains '解密失败' <(printf '%s\n' "$bad_output") "strict stcp import explains decode failure"
 
   local service_output
   service_output="$(
@@ -777,6 +842,35 @@ test_import_targets_and_safe_failures() {
   assert_contains '重启失败' <(printf '%s\n' "$restart_output") "restart helper reports service restart failure"
   assert_not_contains '已重启' <(printf '%s\n' "$restart_output") "restart helper does not claim success after failure"
 
+  local menu_start_output menu_restart_output
+  menu_start_output="$(
+    (
+      has_cmd() { [[ "$1" == "systemctl" ]]; }
+      service_exists() { return 0; }
+      print_service_summary() { :; }
+      systemctl_enable_restart() { printf 'enable-restart:%s\n' "$1"; }
+      service_action() { printf 'service:%s:%s\n' "$1" "$2"; }
+      ask() { printf '2'; }
+      manage_single_service_menu frpc
+    ) 2>&1
+  )"
+  assert_contains 'enable-restart:frpc' <(printf '%s\n' "$menu_start_output") "service menu start enables autostart"
+  assert_not_contains 'service:frpc:start' <(printf '%s\n' "$menu_start_output") "service menu start does not only start service"
+
+  menu_restart_output="$(
+    (
+      has_cmd() { [[ "$1" == "systemctl" ]]; }
+      service_exists() { return 0; }
+      print_service_summary() { :; }
+      systemctl_enable_restart() { printf 'enable-restart:%s\n' "$1"; }
+      service_action() { printf 'service:%s:%s\n' "$1" "$2"; }
+      ask() { printf '4'; }
+      manage_single_service_menu frpc
+    ) 2>&1
+  )"
+  assert_contains 'enable-restart:frpc' <(printf '%s\n' "$menu_restart_output") "service menu restart enables autostart"
+  assert_not_contains 'service:frpc:restart' <(printf '%s\n' "$menu_restart_output") "service menu restart does not only restart service"
+
   (
     has_cmd() { [[ "$1" == "systemctl" ]]; }
     systemctl() {
@@ -865,6 +959,140 @@ test_import_targets_and_safe_failures() {
   fi
   assert_eq "1" "$existing_status" "strict xtcp import rejects bare instance target"
   assert_contains 'client:<name>' <(printf '%s\n' "$existing_output") "bare xtcp instance target explains required syntax"
+}
+
+test_stcp_import_code_helpers() {
+  require_function render_stcp_payload
+  require_function encrypt_payload_code
+  require_function decrypt_payload_code
+  require_function parse_stcp_payload_value
+  require_function write_stcp_exposed_config
+  require_function write_stcp_visitor_config_from_payload
+  require_function create_stcp_exposed_and_code
+  require_function import_stcp_code_to_visitor
+  require_function stcp_pair_menu
+
+  local payload code decoded exposed_file visitor_file
+  payload="$(render_stcp_payload \
+    "secret_ssh" \
+    "secret_ssh_visitor" \
+    "secret-key" \
+    "127.0.0.1" \
+    "6000" \
+    "remote-user" \
+    "*")"
+
+  assert_eq "install-frp-stcp-v1" "$(parse_stcp_payload_value "$payload" format)" "stcp payload format"
+  assert_eq "secret_ssh" "$(parse_stcp_payload_value "$payload" proxyName)" "stcp proxy name parsed"
+  assert_eq "secret_ssh_visitor" "$(parse_stcp_payload_value "$payload" visitorName)" "stcp visitor name parsed"
+  assert_eq "remote-user" "$(parse_stcp_payload_value "$payload" serverUser)" "stcp server user parsed"
+
+  code="$(encrypt_payload_code "IFRP-STCP-V1" "passphrase" "$payload")"
+  [[ "$code" == IFRP-STCP-V1:* ]] || fail "stcp code prefix missing"
+  decoded="$(decrypt_payload_code "IFRP-STCP-V1" "passphrase" "$code")"
+  assert_eq "$payload" "$decoded" "stcp code decrypts to payload"
+
+  exposed_file="${TMP_DIR}/stcp-exposed.toml"
+  write_stcp_exposed_config "$exposed_file" "secret_ssh" "secret-key" "127.0.0.1" "22" "*"
+  assert_contains 'type = "stcp"' "$exposed_file" "stcp exposed proxy rendered"
+  assert_contains 'localPort = 22' "$exposed_file" "stcp exposed local port rendered"
+  assert_contains 'allowUsers = ["*"]' "$exposed_file" "stcp exposed allow users rendered"
+
+  visitor_file="${TMP_DIR}/stcp-visitor.toml"
+  write_stcp_visitor_config_from_payload "$visitor_file" "$payload"
+  assert_contains 'type = "stcp"' "$visitor_file" "stcp visitor rendered"
+  assert_contains 'serverName = "secret_ssh"' "$visitor_file" "stcp visitor server name rendered"
+  assert_contains 'secretKey = "secret-key"' "$visitor_file" "stcp visitor secret rendered"
+  assert_contains 'bindPort = 6000' "$visitor_file" "stcp visitor bind port rendered"
+  assert_contains 'serverUser = "remote-user"' "$visitor_file" "stcp visitor server user rendered"
+
+  local strict_output strict_status
+  strict_status=0
+  if strict_output="$(
+    (
+      CONFIG_DIR="${TMP_DIR}/strict-stcp"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${CONFIG_DIR}/logs"
+      create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; : > "$FRPC_CONFIG"; }
+      confirm() { return 0; }
+      verify_config() { printf 'verify:%s\n' "$2"; return 23; }
+      restart_service_if_present() { printf 'restart:%s\n' "$1"; }
+      import_stcp_code_to_visitor "$code" "passphrase" "true" "default"
+    ) 2>&1
+  )"; then
+    fail "strict stcp import should return verify failure"
+  else
+    strict_status=$?
+  fi
+  assert_eq "23" "$strict_status" "strict stcp import returns verify failure"
+  assert_contains "verify:${TMP_DIR}/strict-stcp/frpc.toml" <(printf '%s\n' "$strict_output") "strict stcp import verifies selected config"
+  assert_not_contains 'restart:frpc' <(printf '%s\n' "$strict_output") "strict stcp import skips restart after verify failure"
+
+  local instance_root="${TMP_DIR}/stcp-instance" instance_output
+  instance_output="$(
+    (
+      CONFIG_DIR="${instance_root}/etc/frp"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${instance_root}/var/log/frp"
+      create_dirs_and_user() {
+        mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "${FRPC_CLIENTS_DIR}/home/frpc.d" "$PRESET_DIR" "$LOG_DIR"
+        : > "${FRPC_CLIENTS_DIR}/home/frpc.toml"
+      }
+      verify_config() { printf 'verify:%s\n' "$2"; return 0; }
+      restart_service_if_present() { printf 'restart:%s\n' "$1"; }
+      import_stcp_code_to_visitor "$code" "passphrase" "true" "client:home"
+    ) 2>&1
+  )"
+  assert_contains "verify:${instance_root}/etc/frp/clients/home/frpc.toml" <(printf '%s\n' "$instance_output") "strict stcp import verifies client target config"
+  assert_contains 'type = "stcp"' "${instance_root}/etc/frp/clients/home/frpc.d/secret_ssh_visitor.toml" "strict stcp import writes client target visitor"
+  assert_contains 'restart:frpc@home' <(printf '%s\n' "$instance_output") "strict stcp import restarts client target"
+
+  local create_root create_output
+  create_root="${TMP_DIR}/create-stcp"
+  create_output="$(
+    (
+      CONFIG_DIR="${create_root}/etc/frp"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      PRESET_DIR="${CONFIG_DIR}/presets.d"
+      LOG_DIR="${create_root}/var/log/frp"
+      create_dirs_and_user() { mkdir -p "$CONFIG_DIR" "$FRPC_CONF_DIR" "$FRPC_CLIENTS_DIR" "$PRESET_DIR" "$LOG_DIR"; : > "$FRPC_CONFIG"; }
+      ask_required() { printf 'secret_ssh'; }
+      ask() {
+        case "$1" in
+          secretKey*) printf 'secret-key' ;;
+          被访问本地服务\ IP*) printf '127.0.0.1' ;;
+          访问端本地监听地址*) printf '127.0.0.1' ;;
+          被访问端\ frpc\ user*) printf 'remote-user' ;;
+          allowUsers*) printf '*' ;;
+          导入码加密口令*) printf 'passphrase' ;;
+          *) printf '%s' "${2:-}" ;;
+        esac
+      }
+      ask_port() {
+        case "$1" in
+          被访问本地服务端口*) printf '22' ;;
+          访问端本地监听端口*) printf '6000' ;;
+          *) printf '%s' "${2:-}" ;;
+        esac
+      }
+      verify_config_before_restart() { printf 'verify:%s\n' "$2"; return 0; }
+      restart_service_if_present() { printf 'restart:%s\n' "$1"; }
+      encrypt_payload_code() { printf 'IFRP-STCP-V1:test'; printf '\npayload:%s\n' "$3" >&2; }
+      create_stcp_exposed_and_code default
+    ) 2>&1
+  )"
+  assert_contains 'type = "stcp"' "${create_root}/etc/frp/frpc.d/secret_ssh.toml" "stcp exposed setup writes proxy file"
+  assert_contains 'payload:format = "install-frp-stcp-v1"' <(printf '%s\n' "$create_output") "stcp exposed setup emits stcp payload"
+  assert_contains '--import-stcp-code' <(printf '%s\n' "$create_output") "stcp exposed setup prints one-click import"
+  assert_contains 'restart:frpc' <(printf '%s\n' "$create_output") "stcp exposed setup restarts selected service"
 }
 
 test_xtcp_import_code_helpers() {
@@ -1320,7 +1548,7 @@ EOF_FAKE_FRPC_RESTORE
   frpc_menu="$(render_frpc_menu)"
   frps_menu="$(render_frps_menu)"
   assert_contains '1) 安装/更新客户端' <(printf '%s\n' "$frpc_menu") "client menu has install entry"
-  assert_contains '2) 启动/停止/重启' <(printf '%s\n' "$frpc_menu") "client menu exposes service management"
+  assert_contains '2) 启动并自启/停止/重启并自启' <(printf '%s\n' "$frpc_menu") "client menu exposes service management"
   assert_contains '3) 客户端列表' <(printf '%s\n' "$frpc_menu") "client menu exposes client list management"
   assert_contains '4) 配置文件' <(printf '%s\n' "$frpc_menu") "client menu groups view edit verify config"
   assert_contains '5) 日志' <(printf '%s\n' "$frpc_menu") "client menu exposes logs"
@@ -1385,6 +1613,7 @@ main() {
   test_log_fix_all_is_best_effort
   test_frpc_proxy_target_helpers
   test_import_targets_and_safe_failures
+  test_stcp_import_code_helpers
   test_xtcp_import_code_helpers
   test_frps_pairing_code_helpers
   test_install_state_and_status_bar
