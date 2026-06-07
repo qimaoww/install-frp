@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r26}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r27}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -1146,7 +1146,7 @@ choose_existing_frpc_client_name() {
     render_no_frpc_instances_hint
     return 1
   fi
-  render_frpc_instance_list
+  render_named_frpc_client_list
   choice="$(ask "请选择客户端编号" "1")"
   choice="$(trim "$choice")"
   if [[ "$choice" =~ ^[0-9]+$ ]]; then
@@ -1168,7 +1168,20 @@ render_no_frpc_instances_hint() {
   printf '下一步：客户端管理 -> 客户端列表 -> 新建/重配客户端，或 新增配置 -> 导入接入码。\n'
 }
 
-render_frpc_instance_list() {
+render_no_frpc_clients_hint() {
+  printf '没有可管理的 frpc 客户端。\n'
+  printf '下一步：客户端管理 -> 客户端列表 -> 新建/重配客户端，或 新增配置 -> 导入接入码。\n'
+}
+
+list_frpc_client_targets() {
+  local name
+  [[ -f "$FRPC_CONFIG" ]] && printf 'default\tfrpc\n'
+  while IFS= read -r name; do
+    printf 'named\t%s\n' "$name"
+  done < <(list_frpc_instances)
+}
+
+render_named_frpc_client_list() {
   local instances=() name service config split_dir
   mapfile -t instances < <(list_frpc_instances)
   if (( ${#instances[@]} == 0 )); then
@@ -1187,6 +1200,95 @@ render_frpc_instance_list() {
     printf '  拆分目录：%s\n' "$split_dir"
     idx=$((idx + 1))
   done
+}
+
+render_frpc_instance_list() {
+  local targets=() entry kind name service config split_dir idx=1
+  mapfile -t targets < <(list_frpc_client_targets)
+  if (( ${#targets[@]} == 0 )); then
+    render_no_frpc_clients_hint
+    return 0
+  fi
+
+  printf '客户端：\n'
+  for entry in "${targets[@]}"; do
+    IFS=$'\t' read -r kind name <<< "$entry"
+    case "$kind" in
+      default)
+        service="frpc"
+        config="$FRPC_CONFIG"
+        split_dir="$FRPC_CONF_DIR"
+        ;;
+      named)
+        service="$(instance_service_name "$name")"
+        config="$(instance_frpc_config "$name")"
+        split_dir="$(instance_frpc_conf_dir "$name")"
+        ;;
+      *) continue ;;
+    esac
+    printf '%s) %s  %s  %s\n' "$idx" "$name" "$service" "$(ui_service_state "$(service_status_label "$service")")"
+    printf '  主配置：%s\n' "$config"
+    printf '  拆分目录：%s\n' "$split_dir"
+    idx=$((idx + 1))
+  done
+}
+
+set_selected_frpc_client_target() {
+  local kind="$1" name="$2"
+  SELECTED_FRPC_TARGET_KIND="$kind"
+  SELECTED_FRPC_CLIENT_NAME="$name"
+  case "$kind" in
+    default)
+      SELECTED_FRPC_LABEL="frpc"
+      SELECTED_FRPC_CONFIG="$FRPC_CONFIG"
+      SELECTED_FRPC_SPLIT_DIR="$FRPC_CONF_DIR"
+      SELECTED_FRPC_SERVICE="frpc"
+      SELECTED_FRPC_LOG_FILE="${LOG_DIR}/frpc.log"
+      ;;
+    named)
+      SELECTED_FRPC_LABEL="客户端 ${name}"
+      SELECTED_FRPC_CONFIG="$(instance_frpc_config "$name")"
+      SELECTED_FRPC_SPLIT_DIR="$(instance_frpc_conf_dir "$name")"
+      SELECTED_FRPC_SERVICE="$(instance_service_name "$name")"
+      SELECTED_FRPC_LOG_FILE="$(instance_log_file "$name")"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+choose_existing_frpc_client_target() {
+  local targets=() choice idx entry kind name
+  SELECTED_FRPC_TARGET_KIND=""
+  SELECTED_FRPC_CLIENT_NAME=""
+  mapfile -t targets < <(list_frpc_client_targets)
+  if (( ${#targets[@]} == 0 )); then
+    render_no_frpc_clients_hint
+    return 1
+  fi
+  render_frpc_instance_list
+  choice="$(ask "请选择客户端编号" "1")"
+  choice="$(trim "$choice")"
+  if [[ "$choice" =~ ^[0-9]+$ ]]; then
+    idx=$((choice - 1))
+    if (( idx >= 0 && idx < ${#targets[@]} )); then
+      entry="${targets[$idx]}"
+      IFS=$'\t' read -r kind name <<< "$entry"
+      set_selected_frpc_client_target "$kind" "$name"
+      return 0
+    fi
+  elif [[ "$choice" == "frpc" || "$choice" == "default" ]]; then
+    if [[ -f "$FRPC_CONFIG" ]]; then
+      set_selected_frpc_client_target "default" "frpc"
+      return 0
+    fi
+  elif validate_instance_name "$choice" && [[ -f "$(instance_frpc_config "$choice")" ]]; then
+    set_selected_frpc_client_target "named" "$choice"
+    return 0
+  fi
+  warn "没有找到这个客户端。"
+  return 1
 }
 
 render_frpc_template_service() {
@@ -1400,8 +1502,8 @@ copy_default_frpc_to_instance() {
   local name dir config split_dir token_file log_file store_file service copied=0 instance_started=0
 
   if [[ ! -f "$FRPC_CONFIG" ]]; then
-    warn "默认 frpc 主配置不存在：$FRPC_CONFIG"
-    warn "请先配置默认 frpc，或直接新建其它客户端。"
+    warn "frpc.toml 不存在：$FRPC_CONFIG"
+    warn "请先配置 frpc.toml，或直接新建客户端。"
     return 0
   fi
 
@@ -1433,7 +1535,7 @@ copy_default_frpc_to_instance() {
   if [[ -f "$TOKEN_FILE" ]]; then
     cp -a "$TOKEN_FILE" "$token_file"
   else
-    warn "默认 token 文件不存在：$TOKEN_FILE；如果配置使用 tokenSource，请手动补齐 ${token_file}。"
+    warn "token 文件不存在：$TOKEN_FILE；如果配置使用 tokenSource，请手动补齐 ${token_file}。"
   fi
 
   if [[ -f "$FRPC_STORE" ]]; then
@@ -1446,7 +1548,7 @@ copy_default_frpc_to_instance() {
       copied=1
     done < <(find "$FRPC_CONF_DIR" -maxdepth 1 -type f -name '*.toml' -print0 2>/dev/null | sort -z)
   fi
-  (( copied == 1 )) || warn "默认 frpc 拆分配置目录没有可复制的 TOML：${FRPC_CONF_DIR}/*.toml"
+  (( copied == 1 )) || warn "frpc.d 没有可复制的 TOML：${FRPC_CONF_DIR}/*.toml"
 
   chown -R root:"$FRP_USER" "$dir" 2>/dev/null || true
   chown "$FRP_USER":"$FRP_USER" "$log_file" 2>/dev/null || true
@@ -1463,16 +1565,16 @@ copy_default_frpc_to_instance() {
 
   if service_exists frpc; then
     if (( instance_started == 1 )); then
-      if confirm "是否停止并取消默认 frpc 自启，避免同一批配置重复连接" "n"; then
+      if confirm "是否停止并取消 frpc.service 自启，避免同一批配置重复连接" "n"; then
         service_action frpc stop "false"
         service_action frpc disable "false"
       fi
     else
-      warn "客户端 ${service} 未确认启动成功，已保留默认 frpc，避免断开现有连接。"
+      warn "客户端 ${service} 未确认启动成功，已保留 frpc.service，避免断开现有连接。"
     fi
   fi
 
-  ok "已从默认 frpc 复制为客户端 ${name}：$config"
+  ok "已从 frpc.toml 复制为客户端 ${name}：$config"
   echo "拆分配置目录：$split_dir"
 }
 
@@ -2235,12 +2337,12 @@ select_frpc_split_dir_for_write() {
       warn "非交互导入必须指定目标：default 或 client:<name>。"
       return 1
     fi
-    echo "写入目标：1) 默认客户端  2) 其它客户端"
+    echo "写入目标：1) frpc.toml  2) 其它客户端"
     target="$(ask "请选择" "1")"
   fi
   case "$target" in
     1|default|frpc)
-      SELECTED_FRPC_LABEL="默认 frpc"
+      SELECTED_FRPC_LABEL="frpc"
       SELECTED_FRPC_CONFIG="$FRPC_CONFIG"
       SELECTED_FRPC_SPLIT_DIR="$FRPC_CONF_DIR"
       SELECTED_FRPC_SERVICE="frpc"
@@ -3111,7 +3213,7 @@ import_frps_pairing_code() {
       warn "非交互导入必须指定目标：default 或 client:<name>。"
       return 1
     fi
-    echo "导入目标：1) 默认客户端  2) 其它客户端"
+    echo "导入目标：1) frpc.toml  2) 新建客户端"
     target="$(ask "请选择" "1")"
   fi
   case "$target" in
@@ -3173,19 +3275,31 @@ import_frps_pairing_code() {
 }
 
 manage_named_frpc_service_action() {
-  local name service
-  choose_existing_frpc_client_name || return 0
-  name="$SELECTED_FRPC_CLIENT_NAME"
-  service="$(instance_service_name "$name")"
-  manage_single_service_menu "$service"
+  choose_existing_frpc_client_target || return 0
+  manage_single_service_menu "$SELECTED_FRPC_SERVICE"
 }
 
 delete_named_frpc_instance() {
   local name dir service
-  choose_existing_frpc_client_name || return 0
+  choose_existing_frpc_client_target || return 0
   name="$SELECTED_FRPC_CLIENT_NAME"
+  service="$SELECTED_FRPC_SERVICE"
+
+  if [[ "${SELECTED_FRPC_TARGET_KIND:-}" == "default" ]]; then
+    warn "即将删除客户端 ${name}"
+    warn "主配置：$FRPC_CONFIG"
+    warn "拆分目录：$FRPC_CONF_DIR"
+    if confirm "确认继续" "n"; then
+      service_action "$service" stop "false"
+      service_action "$service" disable "false"
+      rm -f "$FRPC_CONFIG" "$FRPC_STORE"
+      rm -rf "$FRPC_CONF_DIR"
+      ok "已删除客户端：$name"
+    fi
+    return 0
+  fi
+
   dir="$(instance_dir "$name")"
-  service="$(instance_service_name "$name")"
   [[ -d "$dir" ]] || { warn "客户端目录不存在：$dir"; return 0; }
   warn "即将删除客户端 ${name}，目录：$dir"
   if confirm "确认继续" "n"; then
@@ -3202,7 +3316,7 @@ manage_frpc_instances_menu() {
     echo "客户端目录：$FRPC_CLIENTS_DIR"
     ui_menu_item 1 "列出客户端"
     ui_menu_item 2 "新建/重配客户端"
-    ui_menu_item 3 "从默认客户端复制"
+    ui_menu_item 3 "从 frpc.toml 复制"
     ui_menu_item 4 "服务管理"
     ui_menu_item 5 "删除客户端" "危险操作"
     ui_menu_back
@@ -3245,14 +3359,14 @@ frpc_config_menu() {
   while true; do
     menu_title "客户端管理 / 配置文件"
     render_component_status "frpc" "${INSTALL_DIR}/frpc" "$FRPC_CONFIG" "frpc"
-    ui_menu_item 1 "默认客户端"
+    ui_menu_item 1 "frpc.toml"
     ui_menu_item 2 "其它客户端"
     ui_menu_back
     local choice name
     choice="$(ask "请选择" "1")"
     case "$choice" in
       1|default|frpc)
-        SELECTED_FRPC_LABEL="默认 frpc"
+        SELECTED_FRPC_LABEL="frpc"
         SELECTED_FRPC_CONFIG="$FRPC_CONFIG"
         SELECTED_FRPC_SPLIT_DIR="$FRPC_CONF_DIR"
         SELECTED_FRPC_SERVICE="frpc"
@@ -3281,12 +3395,12 @@ frpc_config_menu() {
 
 select_existing_frpc_target() {
   local target name config
-  echo "选择客户端：1) 默认客户端  2) 其它客户端"
+  echo "选择客户端：1) frpc.toml  2) 其它客户端"
   target="$(ask "请选择" "1")"
   case "$target" in
     1|default|frpc)
-      [[ -f "$FRPC_CONFIG" ]] || { warn "默认 frpc 主配置不存在：$FRPC_CONFIG"; return 1; }
-      SELECTED_FRPC_LABEL="默认 frpc"
+      [[ -f "$FRPC_CONFIG" ]] || { warn "frpc.toml 不存在：$FRPC_CONFIG"; return 1; }
+      SELECTED_FRPC_LABEL="frpc"
       SELECTED_FRPC_CONFIG="$FRPC_CONFIG"
       SELECTED_FRPC_SPLIT_DIR="$FRPC_CONF_DIR"
       SELECTED_FRPC_SERVICE="frpc"
@@ -3823,9 +3937,9 @@ fix_log_config_menu() {
   echo
   info "一键修复/启用文件日志"
   ui_menu_item 1 "修复 frps 文件日志配置"
-  ui_menu_item 2 "修复默认 frpc 文件日志配置"
+  ui_menu_item 2 "修复 frpc.toml 文件日志配置"
   ui_menu_item 3 "修复其它 frpc 客户端文件日志配置"
-  ui_menu_item 4 "修复全部" "frps + 默认 frpc + 其它客户端"
+  ui_menu_item 4 "修复全部" "frps + frpc.toml + 其它客户端"
   ui_menu_back
   choice="$(ask "请选择" "4")"
   mkdir -p "$LOG_DIR"

@@ -123,7 +123,9 @@ test_frpc_base_config_renderer() {
 
 test_named_instance_lifecycle_helpers() {
   require_function list_frpc_instances
+  require_function list_frpc_client_targets
   require_function render_frpc_instance_list
+  require_function choose_existing_frpc_client_target
   require_function render_frpc_template_service
   require_function write_frpc_template_service
   require_function configure_named_frpc_instance
@@ -133,27 +135,38 @@ test_named_instance_lifecycle_helpers() {
   require_function frpc_management_menu
 
   mkdir -p "${FRPC_CLIENTS_DIR}/home" "${FRPC_CLIENTS_DIR}/company" "${FRPC_CLIENTS_DIR}/empty" "${FRPC_CLIENTS_DIR}/bad name"
+  printf 'serverPort = 7000\n' > "$FRPC_CONFIG"
+  mkdir -p "$FRPC_CONF_DIR"
   : > "${FRPC_CLIENTS_DIR}/home/frpc.toml"
   : > "${FRPC_CLIENTS_DIR}/company/frpc.toml"
   : > "${FRPC_CLIENTS_DIR}/bad name/frpc.toml"
 
   assert_eq $'company\nhome' "$(list_frpc_instances)" "named instances listed from configs"
+  assert_eq $'default\tfrpc\nnamed\tcompany\nnamed\thome' "$(list_frpc_client_targets)" "all clients include frpc.toml and named configs"
   assert_not_contains 'bad name' <(list_frpc_instances) "invalid instance directory is ignored"
   local rendered_instances
   rendered_instances="$(render_frpc_instance_list)"
+  assert_contains "$FRPC_CONFIG" <(printf '%s\n' "$rendered_instances") "rendered clients show frpc.toml client"
+  assert_contains '1) frpc  frpc' <(printf '%s\n' "$rendered_instances") "rendered clients list frpc.toml as first client"
   assert_contains 'company' <(printf '%s\n' "$rendered_instances") "rendered instances show company"
   assert_contains 'home' <(printf '%s\n' "$rendered_instances") "rendered instances show home"
   assert_contains 'frpc@home' <(printf '%s\n' "$rendered_instances") "rendered instances show service name"
 
-  local old_clients_dir empty_instances
+  local old_clients_dir old_frpc_config old_frpc_conf_dir empty_instances
   old_clients_dir="$FRPC_CLIENTS_DIR"
+  old_frpc_config="$FRPC_CONFIG"
+  old_frpc_conf_dir="$FRPC_CONF_DIR"
   FRPC_CLIENTS_DIR="${TMP_DIR}/empty-clients"
+  FRPC_CONFIG="${TMP_DIR}/empty-frpc.toml"
+  FRPC_CONF_DIR="${TMP_DIR}/empty-frpc.d"
   mkdir -p "$FRPC_CLIENTS_DIR"
   empty_instances="$(render_frpc_instance_list)"
-  assert_contains '没有其它客户端' <(printf '%s\n' "$empty_instances") "empty client list explains next step"
+  assert_contains '没有可管理的 frpc 客户端' <(printf '%s\n' "$empty_instances") "empty client list explains next step"
   assert_contains '客户端管理 -> 客户端列表 -> 新建/重配客户端' <(printf '%s\n' "$empty_instances") "empty client list uses absolute menu path"
   assert_not_contains '选择 2)' <(printf '%s\n' "$empty_instances") "empty instance list avoids relative menu number"
   FRPC_CLIENTS_DIR="$old_clients_dir"
+  FRPC_CONFIG="$old_frpc_config"
+  FRPC_CONF_DIR="$old_frpc_conf_dir"
 
   local service_path="${TMP_DIR}/frpc@.service"
   render_frpc_template_service > "$service_path"
@@ -246,7 +259,36 @@ EOF_DEFAULT_FRPC
 
   local instance_menu
   instance_menu="$(declare -f manage_frpc_instances_menu)"
-  assert_contains '从默认客户端复制' <(printf '%s\n' "$instance_menu") "multi-client menu exposes copy default action"
+  assert_contains '从 frpc.toml 复制' <(printf '%s\n' "$instance_menu") "multi-client menu exposes copy frpc.toml action"
+
+  local delete_root delete_output
+  delete_root="${TMP_DIR}/delete-default-client"
+  mkdir -p "${delete_root}/etc/frp/frpc.d" "${delete_root}/var/log/frp"
+  printf 'serverPort = 7000\n' > "${delete_root}/etc/frp/frpc.toml"
+  printf '[[proxies]]\nname = "ssh"\n' > "${delete_root}/etc/frp/frpc.d/ssh.toml"
+  printf '{}\n' > "${delete_root}/etc/frp/frpc-store.json"
+  printf 'shared-token\n' > "${delete_root}/etc/frp/token"
+  delete_output="$(
+    (
+      CONFIG_DIR="${delete_root}/etc/frp"
+      FRPC_CONFIG="${CONFIG_DIR}/frpc.toml"
+      FRPC_CONF_DIR="${CONFIG_DIR}/frpc.d"
+      FRPC_CLIENTS_DIR="${CONFIG_DIR}/clients"
+      FRPC_STORE="${CONFIG_DIR}/frpc-store.json"
+      TOKEN_FILE="${CONFIG_DIR}/token"
+      ask() { printf '1'; }
+      confirm() { return 0; }
+      service_action() { printf 'service:%s:%s\n' "$1" "$2"; }
+      delete_named_frpc_instance
+    ) 2>&1
+  )"
+  assert_contains 'service:frpc:stop' <(printf '%s\n' "$delete_output") "delete frpc.toml client stops frpc service"
+  assert_contains 'service:frpc:disable' <(printf '%s\n' "$delete_output") "delete frpc.toml client disables frpc service"
+  [[ ! -e "${delete_root}/etc/frp/frpc.toml" ]] || fail "delete frpc.toml client should remove main config"
+  [[ ! -d "${delete_root}/etc/frp/frpc.d" ]] || fail "delete frpc.toml client should remove split dir"
+  [[ ! -e "${delete_root}/etc/frp/frpc-store.json" ]] || fail "delete frpc.toml client should remove store file"
+  [[ -f "${delete_root}/etc/frp/token" ]] || fail "delete frpc.toml client should not remove shared token"
+  pass "delete frpc.toml client removes client files but keeps shared token"
 }
 
 test_config_edit_helpers() {

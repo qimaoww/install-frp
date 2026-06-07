@@ -48,7 +48,7 @@ sudo bash frp.sh
 菜单顶部只显示运行概况；版本和配置细节在子菜单和安装摘要里查看：
 
 ```text
-frp 管理脚本 2026.06.07-r26
+frp 管理脚本 2026.06.07-r27
 状态：服务端:未运行 | 客户端:2个/运行1
 ```
 
@@ -134,7 +134,7 @@ bash <(curl -fsSL 'https://raw.githubusercontent.com/qimaoww/install-frp/main/fr
 0) 返回
 ```
 
-默认客户端会生成：
+安装客户端会生成：
 
 ```bash
 /etc/frp/frpc.toml
@@ -155,7 +155,7 @@ includes = ["/etc/frp/frpc.d/*.toml"]
 
 ## 客户端列表
 
-客户端列表适合一台机器同时连接多个不同的 `frps`，或用不同 token、协议、配置目录隔离配置。脚本会自动识别 `/etc/frp/clients/*/frpc.toml`；新建时可以直接回车让脚本自动生成客户端编号。
+客户端列表适合一台机器同时连接多个不同的 `frps`，或用不同 token、协议、配置目录隔离配置。脚本会自动识别 `/etc/frp/frpc.toml` 和 `/etc/frp/clients/*/frpc.toml`；有配置就会列出来。新建时可以直接回车让脚本自动生成客户端编号。
 
 每个客户端独立保存：
 
@@ -166,7 +166,7 @@ includes = ["/etc/frp/frpc.d/*.toml"]
 /var/log/frp/frpc-<name>.log
 ```
 
-已有默认 `frpc` 时，可以在 `客户端管理 -> 客户端列表 -> 从默认客户端复制` 直接生成一个独立客户端。脚本会复制默认主配置、`frpc.d/*.toml`、token 和 store 文件，并把 `includes`、`auth.tokenSource.file.path`、`log.to`、`store.path` 改成这个客户端自己的路径。
+已有 `/etc/frp/frpc.toml` 时，可以在 `客户端管理 -> 客户端列表 -> 从 frpc.toml 复制` 直接生成一个独立客户端。脚本会复制主配置、`frpc.d/*.toml`、token 和 store 文件，并把 `includes`、`auth.tokenSource.file.path`、`log.to`、`store.path` 改成这个客户端自己的路径。
 
 systemd 使用模板服务：
 
@@ -192,7 +192,7 @@ bash frp.sh --service frpc@home restart
 服务端和客户端各自管理自己的配置，避免主菜单和子菜单重复：
 
 - 服务端：`服务端管理 -> 配置`，可查看、编辑、校验 `/etc/frp/frps.toml`
-- 客户端：`客户端管理 -> 配置文件`，可选择默认客户端或其它客户端，再查看、编辑、校验主配置和拆分配置，也可直接新增配置到当前客户端
+- 客户端：`客户端管理 -> 配置文件`，可选择 `frpc.toml` 或 `/etc/frp/clients` 里的客户端，再查看、编辑、校验主配置和拆分配置，也可直接新增配置到当前客户端
 
 客户端配置页：
 
@@ -205,7 +205,7 @@ bash frp.sh --service frpc@home restart
 0) 返回
 ```
 
-在这个页面选择“新增配置”时，脚本会直接写入当前客户端的拆分目录，不会再重复询问“默认客户端 / 其它客户端”。
+在这个页面选择“新增配置”时，脚本会直接写入当前客户端的拆分目录，不会再重复询问写入目标。
 
 编辑器选择顺序：
 
@@ -259,7 +259,7 @@ disableAssistedAddrs = true
 disableAssistedAddrs = true
 ```
 
-旧配置可以直接在 XTCP 菜单选择“检查/修复现有配置”。脚本会扫描默认客户端或其它客户端的 `frpc.d` 里的 XTCP 配置，先显示摘要，再备份并把协议保持/改为 `quic`，保留 `keepTunnelOpen = true`，把 `fallbackTimeoutMs` 调到 5000，并按你的选择启用或移除 `disableAssistedAddrs`。
+旧配置可以直接在 XTCP 菜单选择“检查/修复现有配置”。脚本会扫描当前客户端 `frpc.d` 里的 XTCP 配置，先显示摘要，再备份并把协议保持/改为 `quic`，保留 `keepTunnelOpen = true`，把 `fallbackTimeoutMs` 调到 5000，并按你的选择启用或移除 `disableAssistedAddrs`。
 
 也可以直接用命令查看或修复单个拆分配置，也可以传目录批量处理：
 
@@ -336,7 +336,7 @@ journalctl -u frps -n 100 --no-pager
 journalctl -u frpc@home -n 100 --no-pager
 ```
 
-脚本里的“全局校验”和“日志修复”会同时处理默认 `frpc` 和其它客户端 `frpc@<name>`。
+脚本里的“全局校验”和“日志修复”会同时处理 `frpc.toml` 和其它客户端 `frpc@<name>`。
 
 ---
 
@@ -347,15 +347,15 @@ journalctl -u frpc@home -n 100 --no-pager
 /usr/local/bin/frpc                    frpc 二进制
 
 /etc/frp/frps.toml                     frps 主配置
-/etc/frp/frpc.toml                     默认 frpc 主配置
-/etc/frp/frpc.d/                       默认 frpc 拆分配置
+/etc/frp/frpc.toml                     frpc 主配置
+/etc/frp/frpc.d/                       frpc 拆分配置
 /etc/frp/clients/<name>/               其它 frpc 客户端目录
 /etc/frp/presets.d/                    frpc 自定义预设目录
-/etc/frp/token                         默认 tokenSource 文件
+/etc/frp/token                         tokenSource 文件
 /etc/frp/installer.env                 脚本配置
 
 /etc/systemd/system/frps.service       frps systemd 服务
-/etc/systemd/system/frpc.service       默认 frpc systemd 服务
+/etc/systemd/system/frpc.service       frpc systemd 服务
 /etc/systemd/system/frpc@.service      其它 frpc 客户端模板服务
 ```
 
