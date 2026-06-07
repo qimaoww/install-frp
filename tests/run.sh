@@ -150,14 +150,14 @@ test_named_instance_lifecycle_helpers() {
   FRPC_CLIENTS_DIR="${TMP_DIR}/empty-clients"
   mkdir -p "$FRPC_CLIENTS_DIR"
   empty_instances="$(render_frpc_instance_list)"
-  assert_contains '没有命名 frpc 实例' <(printf '%s\n' "$empty_instances") "empty instance list explains next step"
-  assert_contains '客户端 -> 实例 -> 新建/重配实例' <(printf '%s\n' "$empty_instances") "empty instance list uses absolute menu path"
+  assert_contains '没有其它客户端' <(printf '%s\n' "$empty_instances") "empty client list explains next step"
+  assert_contains '客户端管理 -> 客户端列表 -> 新建/重配客户端' <(printf '%s\n' "$empty_instances") "empty client list uses absolute menu path"
   assert_not_contains '选择 2)' <(printf '%s\n' "$empty_instances") "empty instance list avoids relative menu number"
   FRPC_CLIENTS_DIR="$old_clients_dir"
 
   local service_path="${TMP_DIR}/frpc@.service"
   render_frpc_template_service > "$service_path"
-  assert_contains 'Description=frp client instance %i service' "$service_path" "template description"
+  assert_contains 'Description=frp client %i service' "$service_path" "template description"
   assert_contains 'ExecStart='"${INSTALL_DIR}"'/frpc -c '"${FRPC_CLIENTS_DIR}"'/%i/frpc.toml' "$service_path" "template execstart"
 
   local migrate_root="${TMP_DIR}/copy-default" copy_output instance_config instance_split instance_token instance_store instance_log
@@ -195,6 +195,7 @@ EOF_DEFAULT_FRPC
       printf 'secret-token\n' > "$TOKEN_FILE"
       printf '{"proxies":[]}\n' > "$FRPC_STORE"
       printf '[[proxies]]\nname = "ssh"\ntype = "tcp"\nlocalPort = 22\nremotePort = 6000\n' > "${FRPC_CONF_DIR}/ssh.toml"
+      ask() { printf 'home'; }
       ask_required() { printf 'home'; }
       confirm() { [[ "$1" == 是否现在启动* ]]; }
       verify_config() { printf 'verify:%s\n' "$2"; return 0; }
@@ -228,6 +229,7 @@ EOF_DEFAULT_FRPC
       LOG_DIR="${migrate_root}/var/log/frp"
       TOKEN_FILE="${CONFIG_DIR}/token"
       FRPC_STORE="${CONFIG_DIR}/frpc-store.json"
+      ask() { printf 'failed'; }
       ask_required() { printf 'failed'; }
       confirm() { return 0; }
       verify_config() { return 0; }
@@ -244,7 +246,7 @@ EOF_DEFAULT_FRPC
 
   local instance_menu
   instance_menu="$(declare -f manage_frpc_instances_menu)"
-  assert_contains '从默认 frpc 复制为实例' <(printf '%s\n' "$instance_menu") "instance menu exposes copy default action"
+  assert_contains '从默认客户端复制' <(printf '%s\n' "$instance_menu") "multi-client menu exposes copy default action"
 }
 
 test_config_edit_helpers() {
@@ -286,8 +288,8 @@ test_config_edit_helpers() {
       frpc_config_menu
     ) 2>&1
   )"
-  assert_contains '没有命名 frpc 实例' <(printf '%s\n' "$empty_config_output") "frpc config named instance stops early when no instances exist"
-  assert_contains '客户端 -> 实例 -> 新建/重配实例' <(printf '%s\n' "$empty_config_output") "frpc config named instance gives absolute create path"
+  assert_contains '没有其它客户端' <(printf '%s\n' "$empty_config_output") "frpc config other client stops early when no clients exist"
+  assert_contains '客户端管理 -> 客户端列表 -> 新建/重配客户端' <(printf '%s\n' "$empty_config_output") "frpc config other client gives absolute create path"
   FRPC_CLIENTS_DIR="$old_clients_dir"
 }
 
@@ -420,26 +422,38 @@ test_frpc_proxy_target_helpers() {
   require_function write_rendered_frpc_config
   require_function render_custom_preset_to_file
   require_function paste_raw_frpc_toml
+  require_function add_proxy_by_type
   require_function add_proxy_manual_wizard
+  require_function add_stcp_sudp_proxy_menu
+  require_function add_more_config_menu
+  require_function add_config_menu
   require_function add_proxy_wizard
 
-  local frps_menu_body frpc_target_body add_proxy_body manage_presets_body write_body preset_body paste_body manual_body
+  local frps_menu_body frpc_target_body add_proxy_body more_config_body manage_presets_body write_body preset_body paste_body typed_body manual_body
   frps_menu_body="$(declare -f frps_config_menu)"
   frpc_target_body="$(declare -f frpc_config_target_menu_direct)"
   add_proxy_body="$(declare -f add_proxy_wizard)"
+  more_config_body="$(declare -f add_more_config_menu)"
   manage_presets_body="$(declare -f manage_custom_presets_menu)"
   write_body="$(declare -f write_rendered_frpc_config)"
   preset_body="$(declare -f render_custom_preset_to_file)"
   paste_body="$(declare -f paste_raw_frpc_toml)"
+  typed_body="$(declare -f add_proxy_by_type)"
   manual_body="$(declare -f add_proxy_manual_wizard)"
 
   assert_contains 'verify_config_interactive "${INSTALL_DIR}/frps" "$FRPS_CONFIG"' <(printf '%s\n' "$frps_menu_body") "frps verify menu catches verify failure"
   assert_contains 'verify_config_interactive "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"' <(printf '%s\n' "$frpc_target_body") "frpc verify menu catches verify failure"
   assert_not_contains 'select_frpc_split_dir_for_write || return 0' <(printf '%s\n' "$add_proxy_body") "proxy wizard does not choose target on entry"
-  assert_contains 'with_frpc_write_target apply_custom_preset' <(printf '%s\n' "$add_proxy_body") "proxy wizard chooses target before applying preset"
-  assert_contains 'manage_custom_presets_menu' <(printf '%s\n' "$add_proxy_body") "proxy wizard manages presets without selecting target"
-  assert_contains 'with_frpc_write_target add_proxy_manual_wizard' <(printf '%s\n' "$add_proxy_body") "proxy wizard chooses target before manual write"
-  assert_contains 'with_frpc_write_target paste_raw_frpc_toml' <(printf '%s\n' "$add_proxy_body") "proxy wizard chooses target before raw toml write"
+  assert_contains 'ui_menu_item 1 "新增 TCP 配置"' <(printf '%s\n' "$add_proxy_body") "new config menu exposes tcp config entry"
+  assert_contains 'with_frpc_write_target add_proxy_by_type tcp' <(printf '%s\n' "$add_proxy_body") "tcp config entry writes through selected target"
+  assert_contains 'with_frpc_write_target add_proxy_by_type udp' <(printf '%s\n' "$add_proxy_body") "udp config entry writes through selected target"
+  assert_contains 'with_frpc_write_target add_proxy_by_type http' <(printf '%s\n' "$add_proxy_body") "http config entry writes through selected target"
+  assert_contains 'xtcp_pair_menu' <(printf '%s\n' "$add_proxy_body") "new config menu exposes xtcp config entry"
+  assert_contains 'import_frps_pairing_code' <(printf '%s\n' "$add_proxy_body") "new config menu exposes pairing import"
+  assert_contains 'with_frpc_write_target apply_custom_preset' <(printf '%s\n' "$more_config_body") "more config menu chooses target before applying preset"
+  assert_contains 'manage_custom_presets_menu' <(printf '%s\n' "$more_config_body") "more config menu manages presets without selecting target"
+  assert_contains 'with_frpc_write_target add_proxy_manual_wizard' <(printf '%s\n' "$more_config_body") "more config menu chooses target before manual write"
+  assert_contains 'with_frpc_write_target paste_raw_frpc_toml' <(printf '%s\n' "$more_config_body") "more config menu chooses target before raw toml write"
   assert_not_contains 'with_frpc_write_target apply_custom_preset' <(printf '%s\n' "$manage_presets_body") "preset management does not duplicate apply action"
   assert_not_contains 'with_frpc_write_target paste_raw_frpc_toml' <(printf '%s\n' "$manage_presets_body") "preset management does not duplicate raw toml action"
 
@@ -450,13 +464,14 @@ test_frpc_proxy_target_helpers() {
 
   assert_contains 'SELECTED_FRPC_SPLIT_DIR' <(printf '%s\n' "$preset_body") "custom preset writes selected split dir"
   assert_contains 'SELECTED_FRPC_SPLIT_DIR' <(printf '%s\n' "$paste_body") "raw toml writes selected split dir"
-  assert_contains 'SELECTED_FRPC_SPLIT_DIR' <(printf '%s\n' "$manual_body") "manual wizard writes selected split dir"
-  assert_contains 'SELECTED_FRPC_CONFIG' <(printf '%s\n' "$manual_body") "manual wizard verifies selected main config"
-  assert_contains 'SELECTED_FRPC_SERVICE' <(printf '%s\n' "$manual_body") "manual wizard restarts selected service"
+  assert_contains 'SELECTED_FRPC_SPLIT_DIR' <(printf '%s\n' "$typed_body") "typed proxy writer writes selected split dir"
+  assert_contains 'SELECTED_FRPC_CONFIG' <(printf '%s\n' "$typed_body") "typed proxy writer verifies selected main config"
+  assert_contains 'SELECTED_FRPC_SERVICE' <(printf '%s\n' "$typed_body") "typed proxy writer restarts selected service"
+  assert_contains 'add_proxy_by_type ""' <(printf '%s\n' "$manual_body") "manual wizard delegates to typed writer"
 
   assert_not_contains 'xtcp-visitor' <(printf '%s\n' "$manual_body") "manual wizard does not expose xtcp visitor"
   assert_not_contains 'stcp|xtcp|sudp' <(printf '%s\n' "$manual_body") "manual wizard does not accept xtcp proxy"
-  assert_contains 'stcp sudp stcp-visitor sudp-visitor' <(printf '%s\n' "$manual_body") "manual wizard keeps stcp and sudp proxy types"
+  assert_contains 'stcp sudp stcp-visitor sudp-visitor' <(printf '%s\n' "$typed_body") "typed writer keeps stcp and sudp config types"
 
   local missing_output
   missing_output="$(
@@ -469,7 +484,7 @@ test_frpc_proxy_target_helpers() {
       fi
     ) 2>&1
   )"
-  assert_contains '命名 frpc 实例主配置不存在' <(printf '%s\n' "$missing_output") "missing named instance warns before split dir write"
+  assert_contains '没有其它客户端' <(printf '%s\n' "$missing_output") "missing other client warns before split dir write"
   [[ ! -d "${TMP_DIR}/clients-missing/ghost/frpc.d" ]] || fail "missing named instance should not create orphan split dir"
   pass "missing named instance does not create orphan split dir"
 
@@ -497,6 +512,38 @@ test_frpc_proxy_target_helpers() {
   assert_eq "0" "$write_status" "rendered writer returns success when selected config fails verify"
   assert_contains "verify:${TMP_DIR}/selected-frpc.toml" <(printf '%s\n' "$write_output") "rendered writer verifies selected config"
   assert_not_contains 'restart:frpc@selected' <(printf '%s\n' "$write_output") "rendered writer skips restart after verify failure"
+
+  local tcp_root tcp_output tcp_file
+  tcp_root="${TMP_DIR}/tcp-entry"
+  tcp_file="${tcp_root}/frpc.d/ssh.toml"
+  tcp_output="$(
+    (
+      SELECTED_FRPC_CONFIG="${tcp_root}/frpc.toml"
+      SELECTED_FRPC_SPLIT_DIR="${tcp_root}/frpc.d"
+      SELECTED_FRPC_SERVICE="frpc@tcp"
+      mkdir -p "$SELECTED_FRPC_SPLIT_DIR"
+      printf 'serverPort = 7000\n' > "$SELECTED_FRPC_CONFIG"
+      create_dirs_and_user() { mkdir -p "$SELECTED_FRPC_SPLIT_DIR"; }
+      ask_required() { printf 'ssh'; }
+      ask() { printf '%s' "${2:-}"; }
+      ask_port() {
+        case "$1" in
+          本地服务端口*) printf '22' ;;
+          服务端暴露端口*) printf '6000' ;;
+          *) printf '%s' "${2:-}" ;;
+        esac
+      }
+      confirm() { return 1; }
+      verify_config_before_restart() { printf 'verify:%s\n' "$2"; return 0; }
+      restart_service_if_present() { printf 'restart:%s\n' "$1"; }
+      add_proxy_by_type tcp
+    ) 2>&1
+  )"
+  assert_contains 'type = "tcp"' "$tcp_file" "tcp proxy entry writes tcp type"
+  assert_contains 'localPort = 22' "$tcp_file" "tcp proxy entry writes local port"
+  assert_contains 'remotePort = 6000' "$tcp_file" "tcp proxy entry writes remote port"
+  assert_contains "verify:${tcp_root}/frpc.toml" <(printf '%s\n' "$tcp_output") "tcp proxy entry verifies selected client"
+  assert_contains 'restart:frpc@tcp' <(printf '%s\n' "$tcp_output") "tcp proxy entry restarts selected client"
 }
 
 test_import_targets_and_safe_failures() {
@@ -700,7 +747,7 @@ test_import_targets_and_safe_failures() {
     existing_status=$?
   fi
   assert_eq "1" "$existing_status" "strict frps import rejects bare instance target"
-  assert_contains 'instance:<name>' <(printf '%s\n' "$existing_output") "bare instance target explains required syntax"
+  assert_contains 'client:<name>' <(printf '%s\n' "$existing_output") "bare instance target explains required syntax"
 
   existing_status=0
   if existing_output="$(import_xtcp_code_to_visitor "$xtcp_code" "passphrase" "true" "instance" 2>&1)"; then
@@ -709,7 +756,7 @@ test_import_targets_and_safe_failures() {
     existing_status=$?
   fi
   assert_eq "1" "$existing_status" "strict xtcp import rejects bare instance target"
-  assert_contains 'instance:<name>' <(printf '%s\n' "$existing_output") "bare xtcp instance target explains required syntax"
+  assert_contains 'client:<name>' <(printf '%s\n' "$existing_output") "bare xtcp instance target explains required syntax"
 }
 
 test_xtcp_import_code_helpers() {
@@ -816,12 +863,12 @@ test_xtcp_import_code_helpers() {
       }
       verify_config() { printf 'verify:%s\n' "$2"; return 0; }
       restart_service_if_present() { printf 'restart:%s\n' "$1"; }
-      import_xtcp_code_to_visitor "$code" "passphrase" "true" "instance:home"
+      import_xtcp_code_to_visitor "$code" "passphrase" "true" "client:home"
     ) 2>&1
   )"
-  assert_contains "verify:${instance_root}/etc/frp/clients/home/frpc.toml" <(printf '%s\n' "$instance_output") "strict xtcp import verifies named instance config"
-  assert_contains 'type = "xtcp"' "${instance_root}/etc/frp/clients/home/frpc.d/p2p_ssh_visitor.toml" "strict xtcp import writes named instance visitor"
-  assert_contains 'restart:frpc@home' <(printf '%s\n' "$instance_output") "strict xtcp import restarts named instance"
+  assert_contains "verify:${instance_root}/etc/frp/clients/home/frpc.toml" <(printf '%s\n' "$instance_output") "strict xtcp import verifies client target config"
+  assert_contains 'type = "xtcp"' "${instance_root}/etc/frp/clients/home/frpc.d/p2p_ssh_visitor.toml" "strict xtcp import writes client target visitor"
+  assert_contains 'restart:frpc@home' <(printf '%s\n' "$instance_output") "strict xtcp import restarts client target"
 
   local old_visitor_file
   old_visitor_file="${TMP_DIR}/old-xtcp-visitor.toml"
@@ -1152,20 +1199,25 @@ EOF_FAKE_FRPC_RESTORE
 
   local menu
   menu="$(render_main_menu)"
-  assert_contains '1) 服务端' <(printf '%s\n' "$menu") "compact menu has server entry"
-  assert_contains '3) 工具/维护' <(printf '%s\n' "$menu") "compact menu has tools entry"
+  assert_contains '1) 服务端管理' <(printf '%s\n' "$menu") "main menu has server management entry"
+  assert_contains '2) 新增配置' <(printf '%s\n' "$menu") "main menu has new config entry"
+  assert_contains '3) 客户端管理' <(printf '%s\n' "$menu") "main menu has client management entry"
+  assert_contains '4) 工具/维护' <(printf '%s\n' "$menu") "main menu has tools entry"
   ! printf '%s\n' "$menu" | grep -Eq '^3\) 配置$' || fail "main menu should not duplicate config entry"
-  ! printf '%s\n' "$menu" | grep -Eq '^4\) 日志$' || fail "main menu should not duplicate logs entry"
-  ! printf '%s\n' "$menu" | grep -Fq '5)' || fail "main menu should have only three top-level entries"
+  ! printf '%s\n' "$menu" | grep -Eq '^5\) 日志$' || fail "main menu should not duplicate logs entry"
+  ! printf '%s\n' "$menu" | grep -Fq '5)' || fail "main menu should have only four top-level entries"
   ! printf '%s\n' "$menu" | grep -Fq '10)' || fail "main menu should not expose ten top-level entries"
 
   local frpc_menu frps_menu
   frpc_menu="$(render_frpc_menu)"
   frps_menu="$(render_frps_menu)"
-  assert_contains '1) 安装/更新' <(printf '%s\n' "$frpc_menu") "frpc menu has short install entry"
-  assert_contains '2) 服务管理' <(printf '%s\n' "$frpc_menu") "frpc menu exposes service management"
-  assert_contains '5) 代理配置' <(printf '%s\n' "$frpc_menu") "frpc menu has short proxy entry"
-  assert_contains '7) 配置' <(printf '%s\n' "$frpc_menu") "frpc menu groups view edit verify config"
+  assert_contains '1) 安装/更新客户端' <(printf '%s\n' "$frpc_menu") "client menu has install entry"
+  assert_contains '2) 启动/停止/重启' <(printf '%s\n' "$frpc_menu") "client menu exposes service management"
+  assert_contains '3) 客户端列表' <(printf '%s\n' "$frpc_menu") "client menu exposes client list management"
+  assert_contains '4) 配置文件' <(printf '%s\n' "$frpc_menu") "client menu groups view edit verify config"
+  assert_contains '5) 日志' <(printf '%s\n' "$frpc_menu") "client menu exposes logs"
+  ! printf '%s\n' "$frpc_menu" | grep -Fq '新增配置' || fail "client menu should not contain new config entry"
+  ! printf '%s\n' "$frpc_menu" | grep -Fq '代理' || fail "client menu should not use proxy wording"
   ! printf '%s\n' "$frpc_menu" | grep -Fq '9)' || fail "frpc menu should not duplicate separate verify/view entries"
   ! printf '%s\n' "$frpc_menu" | grep -Fq '默认 frpc 客户端' || fail "frpc menu should not repeat long default client text"
   ! printf '%s\n' "$frpc_menu" | grep -Fq 'systemd 服务' || fail "frpc menu should use short service text"

@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.05.28-r24}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r25}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -1112,9 +1112,60 @@ list_frpc_instances() {
   done
 }
 
+auto_frpc_client_name() {
+  local base name n=0
+  base="$(date '+client-%Y%m%d-%H%M%S' 2>/dev/null || printf 'client-auto')"
+  name="$base"
+  while [[ -e "$(instance_dir "$name" 2>/dev/null || printf '%s/%s' "$FRPC_CLIENTS_DIR" "$name")" ]]; do
+    n=$((n + 1))
+    name="${base}-${n}"
+  done
+  printf '%s' "$name"
+}
+
+ask_new_frpc_client_name() {
+  local name suggested
+  while true; do
+    suggested="$(auto_frpc_client_name)"
+    name="$(ask "保存编号，回车自动生成" "$suggested")"
+    name="$(trim "$name")"
+    [[ -n "$name" ]] || name="$suggested"
+    if validate_instance_name "$name"; then
+      printf '%s' "$name"
+      return 0
+    fi
+    warn "编号不合法，请使用 1-63 位字母、数字、点号、下划线或短横线，且以字母或数字开头。"
+  done
+}
+
+choose_existing_frpc_client_name() {
+  local instances=() choice idx
+  SELECTED_FRPC_CLIENT_NAME=""
+  mapfile -t instances < <(list_frpc_instances)
+  if (( ${#instances[@]} == 0 )); then
+    render_no_frpc_instances_hint
+    return 1
+  fi
+  render_frpc_instance_list
+  choice="$(ask "请选择客户端编号" "1")"
+  choice="$(trim "$choice")"
+  if [[ "$choice" =~ ^[0-9]+$ ]]; then
+    idx=$((choice - 1))
+    if (( idx >= 0 && idx < ${#instances[@]} )); then
+      SELECTED_FRPC_CLIENT_NAME="${instances[$idx]}"
+      return 0
+    fi
+  elif validate_instance_name "$choice" && [[ -f "$(instance_frpc_config "$choice")" ]]; then
+    SELECTED_FRPC_CLIENT_NAME="$choice"
+    return 0
+  fi
+  warn "没有找到这个客户端。"
+  return 1
+}
+
 render_no_frpc_instances_hint() {
-  printf '没有命名 frpc 实例。\n'
-  printf '下一步：客户端 -> 实例 -> 新建/重配实例，或 客户端 -> 接入码 导入为 instance:<name>。\n'
+  printf '没有其它客户端。\n'
+  printf '下一步：客户端管理 -> 客户端列表 -> 新建/重配客户端，或 新增配置 -> 导入接入码。\n'
 }
 
 render_frpc_instance_list() {
@@ -1125,14 +1176,16 @@ render_frpc_instance_list() {
     return 0
   fi
 
-  printf '命名 frpc 实例：\n'
+  printf '其它客户端：\n'
+  local idx=1
   for name in "${instances[@]}"; do
     service="$(instance_service_name "$name")"
     config="$(instance_frpc_config "$name")"
     split_dir="$(instance_frpc_conf_dir "$name")"
-    printf -- '- %s  %s  %s\n' "$name" "$service" "$(ui_service_state "$(service_status_label "$service")")"
+    printf '%s) %s  %s  %s\n' "$idx" "$name" "$service" "$(ui_service_state "$(service_status_label "$service")")"
     printf '  主配置：%s\n' "$config"
     printf '  拆分目录：%s\n' "$split_dir"
+    idx=$((idx + 1))
   done
 }
 
@@ -1146,7 +1199,7 @@ render_frpc_template_service() {
 
   cat <<EOF_SERVICE
 [Unit]
-Description=frp client instance %i service
+Description=frp client %i service
 Documentation=https://gofrp.org/zh-cn/docs/
 After=network-online.target
 Wants=network-online.target
@@ -1174,7 +1227,7 @@ EOF_SERVICE
 write_frpc_template_service() {
   render_frpc_template_service > /etc/systemd/system/frpc@.service
   if has_cmd systemctl; then
-    systemctl daemon-reload || warn "systemctl daemon-reload 失败，请手动执行后再管理 frpc@ 实例。"
+    systemctl daemon-reload || warn "systemctl daemon-reload 失败，请手动执行后再管理 frpc@ 客户端服务。"
   else
     warn "当前系统没有 systemctl，已写入 frpc@ 模板但不能自动重载。"
   fi
@@ -1188,14 +1241,8 @@ configure_named_frpc_instance() {
   local enable_admin admin_addr admin_port admin_user admin_pass enable_store service
 
   echo
-  info "配置命名 frpc 客户端实例"
-  while true; do
-    name="$(ask_required "实例名，只能使用字母数字点号下划线短横线，例如 home" "")"
-    if validate_instance_name "$name"; then
-      break
-    fi
-    warn "实例名不合法，请使用 1-63 位字母、数字、点号、下划线或短横线，且以字母或数字开头。"
-  done
+  info "配置其它 frpc 客户端"
+  name="$(ask_new_frpc_client_name)"
 
   dir="$(instance_dir "$name")"
   config="$(instance_frpc_config "$name")"
@@ -1223,14 +1270,14 @@ configure_named_frpc_instance() {
   [[ "$pool_count" =~ ^[0-9]+$ ]] || pool_count=0
   dns_server="$(ask "自定义 DNS 服务器，留空使用系统 DNS，例如 1.1.1.1" "")"
 
-  enable_admin="$(ask_yes_no_value "是否启用该实例的 Admin UI / 动态代理管理" "n")"
+  enable_admin="$(ask_yes_no_value "是否启用该客户端的 Admin UI / 动态配置管理" "n")"
   if [[ "$enable_admin" == "true" ]]; then
     admin_addr="$(ask "Admin UI 监听地址，建议 127.0.0.1" "127.0.0.1")"
     admin_port="$(ask_port "Admin UI 端口" "7400")"
     admin_user="$(ask "Admin UI 用户名" "admin")"
     admin_pass="$(ask "Admin UI 密码，留空随机生成" "")"
     [[ -z "$admin_pass" ]] && admin_pass="$(random_secret | cut -c1-16)"
-    enable_store="$(ask_yes_no_value "是否启用 Store 动态代理持久化" "Y")"
+    enable_store="$(ask_yes_no_value "是否启用 Store 动态配置持久化" "Y")"
   else
     admin_addr=""; admin_port=""; admin_user=""; admin_pass=""; enable_store="false"
   fi
@@ -1266,8 +1313,8 @@ configure_named_frpc_instance() {
   fi
 
   echo
-  ok "frpc 实例 ${name} 配置完成：$config"
-  echo "代理拆分配置目录：$split_dir"
+  ok "frpc 客户端 ${name} 配置完成：$config"
+  echo "拆分配置目录：$split_dir"
 }
 
 rewrite_frpc_config_for_instance() {
@@ -1354,17 +1401,11 @@ copy_default_frpc_to_instance() {
 
   if [[ ! -f "$FRPC_CONFIG" ]]; then
     warn "默认 frpc 主配置不存在：$FRPC_CONFIG"
-    warn "请先配置默认 frpc，或直接新建命名实例。"
+    warn "请先配置默认 frpc，或直接新建其它客户端。"
     return 0
   fi
 
-  while true; do
-    name="$(ask_required "实例名，只能使用字母数字点号下划线短横线，例如 home" "")"
-    if validate_instance_name "$name"; then
-      break
-    fi
-    warn "实例名不合法，请使用 1-63 位字母、数字、点号、下划线或短横线，且以字母或数字开头。"
-  done
+  name="$(ask_new_frpc_client_name)"
 
   dir="$(instance_dir "$name")"
   config="$(instance_frpc_config "$name")"
@@ -1375,7 +1416,7 @@ copy_default_frpc_to_instance() {
   service="$(instance_service_name "$name")"
 
   if [[ -e "$config" || -d "$split_dir" ]]; then
-    if confirm "实例 ${name} 已存在，是否覆盖同名文件" "n"; then
+    if confirm "客户端 ${name} 已存在，是否覆盖同名文件" "n"; then
       [[ -f "$config" ]] && backup_file "$config" >/dev/null || true
       [[ -f "$token_file" ]] && backup_file "$token_file" >/dev/null || true
       [[ -f "$store_file" ]] && backup_file "$store_file" >/dev/null || true
@@ -1422,17 +1463,17 @@ copy_default_frpc_to_instance() {
 
   if service_exists frpc; then
     if (( instance_started == 1 )); then
-      if confirm "是否停止并取消默认 frpc 自启，避免同一批代理重复连接" "n"; then
+      if confirm "是否停止并取消默认 frpc 自启，避免同一批配置重复连接" "n"; then
         service_action frpc stop "false"
         service_action frpc disable "false"
       fi
     else
-      warn "实例 ${service} 未确认启动成功，已保留默认 frpc，避免断开现有连接。"
+      warn "客户端 ${service} 未确认启动成功，已保留默认 frpc，避免断开现有连接。"
     fi
   fi
 
-  ok "已从默认 frpc 复制为实例 ${name}：$config"
-  echo "代理拆分配置目录：$split_dir"
+  ok "已从默认 frpc 复制为客户端 ${name}：$config"
+  echo "拆分配置目录：$split_dir"
 }
 
 # ---------- frps ----------
@@ -1483,14 +1524,14 @@ configure_frps() {
     quic_port=""
   fi
 
-  enable_http="$(ask_yes_no_value "是否启用 HTTP 虚拟主机代理" "n")"
+  enable_http="$(ask_yes_no_value "是否启用 HTTP 虚拟主机入口" "n")"
   if [[ "$enable_http" == "true" ]]; then
     http_port="$(ask_port "HTTP 访问端口 vhostHTTPPort" "80")"
   else
     http_port=""
   fi
 
-  enable_https="$(ask_yes_no_value "是否启用 HTTPS 虚拟主机代理" "n")"
+  enable_https="$(ask_yes_no_value "是否启用 HTTPS 虚拟主机入口" "n")"
   if [[ "$enable_https" == "true" ]]; then
     https_port="$(ask_port "HTTPS 访问端口 vhostHTTPSPort" "443")"
   else
@@ -1605,14 +1646,14 @@ configure_frpc() {
   [[ "$pool_count" =~ ^[0-9]+$ ]] || pool_count=0
   dns_server="$(ask "自定义 DNS 服务器，留空使用系统 DNS，例如 1.1.1.1" "")"
 
-  enable_admin="$(ask_yes_no_value "是否启用 frpc Admin UI / 动态代理管理" "Y")"
+  enable_admin="$(ask_yes_no_value "是否启用 frpc Admin UI / 动态配置管理" "Y")"
   if [[ "$enable_admin" == "true" ]]; then
     admin_addr="$(ask "Admin UI 监听地址，建议 127.0.0.1" "127.0.0.1")"
     admin_port="$(ask_port "Admin UI 端口" "7400")"
     admin_user="$(ask "Admin UI 用户名" "admin")"
     admin_pass="$(ask "Admin UI 密码，留空随机生成" "")"
     [[ -z "$admin_pass" ]] && admin_pass="$(random_secret | cut -c1-16)"
-    enable_store="$(ask_yes_no_value "是否启用 Store 动态代理持久化" "Y")"
+    enable_store="$(ask_yes_no_value "是否启用 Store 动态配置持久化" "Y")"
   else
     admin_addr=""; admin_port=""; admin_user=""; admin_pass=""; enable_store="false"
   fi
@@ -1651,7 +1692,7 @@ configure_frpc() {
 
   echo
   ok "frpc 主配置完成：$FRPC_CONFIG"
-  echo "代理拆分配置目录：$FRPC_CONF_DIR"
+  echo "拆分配置目录：$FRPC_CONF_DIR"
   if [[ "$enable_admin" == "true" ]]; then
     echo "Admin UI: http://${admin_addr}:${admin_port}  用户：${admin_user}  密码：${admin_pass}"
   fi
@@ -1665,7 +1706,7 @@ install_frpc_flow() {
 append_common_proxy_options() {
   local file="$1" type="$2"
   local use_comp bw health hc_type hc_path
-  if confirm "是否启用该代理的压缩 transport.useCompression" "n"; then
+  if confirm "是否启用该配置的压缩 transport.useCompression" "n"; then
     echo "transport.useCompression = true" >> "$file"
   fi
   bw="$(ask "限速 bandwidthLimit，留空不限制，例如 10MB 或 512KB" "")"
@@ -1737,7 +1778,7 @@ EOF_PROXY
     host_rewrite="$(ask "Host Header 重写 hostHeaderRewrite，留空不设置" "")"
     [[ -n "$host_rewrite" ]] && echo "hostHeaderRewrite = \"$(toml_escape "$host_rewrite")\"" >> "$file"
 
-    if confirm "是否给该 HTTP 代理添加 BasicAuth" "n"; then
+    if confirm "是否给该 HTTP 配置添加 BasicAuth" "n"; then
       http_user="$(ask_required "HTTP BasicAuth 用户名" "admin")"
       http_pass="$(ask "HTTP BasicAuth 密码，留空随机" "")"
       [[ -z "$http_pass" ]] && http_pass="$(random_secret | cut -c1-16)"
@@ -1773,9 +1814,9 @@ EOF_PROXY
 
 add_visitor_stcp_xtcp_sudp() {
   local type="$1" name="$2" file="$3" server_name server_user secret bind_addr bind_port
-  server_name="$(ask_required "要访问的服务端代理名 serverName" "")"
+  server_name="$(ask_required "要访问的服务端配置名 serverName" "")"
   server_user="$(ask "被访问端 frpc user serverUser，留空默认同当前 user" "")"
-  secret="$(ask_required "secretKey，需要和服务端代理一致" "")"
+  secret="$(ask_required "secretKey，需要和服务端配置一致" "")"
   bind_addr="$(ask "本机访问监听地址 bindAddr" "127.0.0.1")"
   bind_port="$(ask_port "本机访问监听端口 bindPort" "6000")"
   cat > "$file" <<EOF_VISITOR
@@ -2191,10 +2232,10 @@ select_frpc_split_dir_for_write() {
   local target="${1:-}" strict="${2:-false}" name config
   if [[ -z "$target" ]]; then
     if [[ "$strict" == "true" && ! -t 0 ]]; then
-      warn "非交互导入必须指定目标：default 或 instance:<name>。"
+      warn "非交互导入必须指定目标：default 或 client:<name>。"
       return 1
     fi
-    echo "写入目标：1) 默认 frpc  2) 命名 frpc 实例"
+    echo "写入目标：1) 默认客户端  2) 其它客户端"
     target="$(ask "请选择" "1")"
   fi
   case "$target" in
@@ -2204,32 +2245,32 @@ select_frpc_split_dir_for_write() {
       SELECTED_FRPC_SPLIT_DIR="$FRPC_CONF_DIR"
       SELECTED_FRPC_SERVICE="frpc"
       ;;
-    2|instance)
+    2|client|instance)
       if [[ "$strict" == "true" ]]; then
-        warn "非交互导入命名实例必须使用 instance:<name>。"
+        warn "非交互导入其它客户端必须使用 client:<name>。"
         return 1
       fi
-      [[ -n "${name:-}" ]] || name="$(ask_required "实例名" "")"
-      validate_instance_name "$name" || { warn "实例名不合法：$name"; return 1; }
+      choose_existing_frpc_client_name || return 1
+      name="$SELECTED_FRPC_CLIENT_NAME"
       config="$(instance_frpc_config "$name")"
       if [[ ! -f "$config" ]]; then
-        warn "命名 frpc 实例主配置不存在：$config"
+        warn "客户端主配置不存在：$config"
         return 1
       fi
-      SELECTED_FRPC_LABEL="实例 ${name}"
+      SELECTED_FRPC_LABEL="客户端 ${name}"
       SELECTED_FRPC_CONFIG="$config"
       SELECTED_FRPC_SPLIT_DIR="$(instance_frpc_conf_dir "$name")"
       SELECTED_FRPC_SERVICE="$(instance_service_name "$name")"
       ;;
-    instance:*)
-      name="${target#instance:}"
-      validate_instance_name "$name" || { warn "实例名不合法：$name"; return 1; }
+    client:*|instance:*)
+      name="${target#*:}"
+      validate_instance_name "$name" || { warn "客户端名不合法：$name"; return 1; }
       config="$(instance_frpc_config "$name")"
       if [[ ! -f "$config" ]]; then
-        warn "命名 frpc 实例主配置不存在：$config"
+        warn "客户端主配置不存在：$config"
         return 1
       fi
-      SELECTED_FRPC_LABEL="实例 ${name}"
+      SELECTED_FRPC_LABEL="客户端 ${name}"
       SELECTED_FRPC_CONFIG="$config"
       SELECTED_FRPC_SPLIT_DIR="$(instance_frpc_conf_dir "$name")"
       SELECTED_FRPC_SERVICE="$(instance_service_name "$name")"
@@ -2251,7 +2292,7 @@ create_xtcp_exposed_and_code() {
   select_frpc_split_dir_for_write || return 0
   server_addr="$(ask_required "导入端连接的 frps 地址/IP/域名" "")"
   server_port="$(ask_port "导入端连接的 frps 端口" "7000")"
-  name="$(ask_required "XTCP 代理名 proxyName" "p2p_ssh")"
+  name="$(ask_required "XTCP 配置名 proxyName" "p2p_ssh")"
   secret="$(ask "secretKey，留空随机生成" "")"
   [[ -z "$secret" ]] && secret="$(random_secret)"
   local_ip="$(ask "被访问本地服务 IP localIP" "127.0.0.1")"
@@ -2595,7 +2636,7 @@ EOF_PRESET_HELP
     echo
   } > "$tmp"
 
-  echo "内容输入方式：1) 粘贴完整 TOML 模板  2) 生成最小代理骨架后再编辑"
+  echo "内容输入方式：1) 粘贴完整 TOML 模板  2) 生成最小配置骨架后再编辑"
   body_method="$(ask "请选择" "1")"
   if [[ "$body_method" == "2" ]]; then
     cat >> "$tmp" <<'EOF_MINIMAL_PROXY'
@@ -2796,17 +2837,22 @@ manage_custom_presets_menu() {
   done
 }
 
-add_proxy_manual_wizard() {
+add_proxy_by_type() {
   create_dirs_and_user
+  local type="${1:-}"
   local config="${SELECTED_FRPC_CONFIG:-$FRPC_CONFIG}"
   local split_dir="${SELECTED_FRPC_SPLIT_DIR:-$FRPC_CONF_DIR}"
   local service="${SELECTED_FRPC_SERVICE:-frpc}"
   [[ -f "$config" ]] || warn "未检测到 $config，建议先安装/配置 frpc。"
-  local type name safe_name file
+  local name safe_name file
   echo
-  info "高级手动添加 frpc 代理/访问者配置"
-  echo "支持类型：tcp udp http https stcp sudp stcp-visitor sudp-visitor"
-  type="$(ask "类型" "tcp")"
+  if [[ -z "$type" ]]; then
+    info "手动添加 frpc 配置"
+    echo "支持类型：tcp udp http https stcp sudp stcp-visitor sudp-visitor"
+    type="$(ask "类型" "tcp")"
+  else
+    info "新增 ${type^^} 配置"
+  fi
   case "$type" in tcp|udp|http|https|stcp|sudp|stcp-visitor|sudp-visitor) ;; *) fatal "不支持的类型：$type" ;; esac
   name="$(ask_required "名称 name，必须唯一" "")"
   safe_name="$(safe_filename "$name")"
@@ -2836,26 +2882,84 @@ add_proxy_manual_wizard() {
   restart_service_if_present "$service"
 }
 
-add_proxy_wizard() {
-  create_dirs_and_user
+add_proxy_manual_wizard() {
+  add_proxy_by_type ""
+}
+
+add_stcp_sudp_proxy_menu() {
   while true; do
-    menu_title "客户端 / 代理配置"
-    ui_menu_item 1 "套用自定义预设"
-    ui_menu_item 2 "管理自定义预设"
-    ui_menu_item 3 "高级手动添加" "代理 / 访问者"
-    ui_menu_item 4 "直接粘贴 TOML"
+    menu_title "新增配置 / 安全 TCP-UDP"
+    ui_menu_item 1 "新增安全 TCP 被访问端" "STCP"
+    ui_menu_item 2 "新增安全 UDP 被访问端" "SUDP"
+    ui_menu_item 3 "新增安全 TCP 访问端" "STCP visitor"
+    ui_menu_item 4 "新增安全 UDP 访问端" "SUDP visitor"
     ui_menu_back
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
-      1) with_frpc_write_target apply_custom_preset; pause ;;
-      2) manage_custom_presets_menu ;;
-      3) with_frpc_write_target add_proxy_manual_wizard; pause ;;
-      4) with_frpc_write_target paste_raw_frpc_toml; pause ;;
+      1) with_frpc_write_target add_proxy_by_type stcp; pause ;;
+      2) with_frpc_write_target add_proxy_by_type sudp; pause ;;
+      3) with_frpc_write_target add_proxy_by_type stcp-visitor; pause ;;
+      4) with_frpc_write_target add_proxy_by_type sudp-visitor; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
   done
+}
+
+add_more_config_menu() {
+  while true; do
+    menu_title "新增配置 / 更多高级配置"
+    ui_menu_item 1 "新增安全 TCP/UDP 配置" "STCP / SUDP"
+    ui_menu_item 2 "套用自定义模板"
+    ui_menu_item 3 "管理自定义模板"
+    ui_menu_item 4 "直接粘贴 TOML"
+    ui_menu_item 5 "手动选择类型"
+    ui_menu_back
+    local choice
+    choice="$(ask "请选择" "1")"
+    case "$choice" in
+      1|stcp|sudp) add_stcp_sudp_proxy_menu ;;
+      2|preset) with_frpc_write_target apply_custom_preset; pause ;;
+      3) manage_custom_presets_menu ;;
+      4|paste) with_frpc_write_target paste_raw_frpc_toml; pause ;;
+      5|manual) with_frpc_write_target add_proxy_manual_wizard; pause ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择"; pause ;;
+    esac
+  done
+}
+
+add_proxy_wizard() {
+  create_dirs_and_user
+  while true; do
+    menu_title "新增配置"
+    ui_menu_item 1 "新增 TCP 配置" "本地端口 -> 服务端端口"
+    ui_menu_item 2 "新增 UDP 配置" "本地 UDP -> 服务端 UDP"
+    ui_menu_item 3 "新增 HTTP 配置" "域名访问 Web"
+    ui_menu_item 4 "新增 HTTPS 配置" "域名访问 Web"
+    ui_menu_item 5 "新增 XTCP 配置" "打洞 / 导入码"
+    ui_menu_item 6 "导入接入码" "从服务端复制"
+    ui_menu_item 7 "更多高级配置"
+    ui_menu_back
+    local choice
+    choice="$(ask "请选择" "1")"
+    case "$choice" in
+      1|tcp) with_frpc_write_target add_proxy_by_type tcp; pause ;;
+      2|udp) with_frpc_write_target add_proxy_by_type udp; pause ;;
+      3|http) with_frpc_write_target add_proxy_by_type http; pause ;;
+      4|https) with_frpc_write_target add_proxy_by_type https; pause ;;
+      5|xtcp) xtcp_pair_menu ;;
+      6|import|code) import_frps_pairing_code; pause ;;
+      7|more) add_more_config_menu ;;
+      0|q|Q) return 0 ;;
+      *) warn "无效选择"; pause ;;
+    esac
+  done
+}
+
+add_config_menu() {
+  add_proxy_wizard
 }
 
 # ---------- management ----------
@@ -2867,7 +2971,7 @@ show_summary() {
   echo "配置目录：${CONFIG_DIR}"
   echo "frps 配置：${FRPS_CONFIG}"
   echo "frpc 配置：${FRPC_CONFIG}"
-  echo "frpc 拆分代理：${FRPC_CONF_DIR}"
+  echo "frpc 拆分配置：${FRPC_CONF_DIR}"
   echo "frpc 自定义预设：${PRESET_DIR}"
   echo "日志目录：${LOG_DIR}"
   echo "脚本日志：${INSTALLER_LOG}"
@@ -2959,10 +3063,10 @@ import_frps_pairing_code() {
     target="$target_spec"
   else
     if [[ "$strict_verify" == "true" && ! -t 0 ]]; then
-      warn "非交互导入必须指定目标：default 或 instance:<name>。"
+      warn "非交互导入必须指定目标：default 或 client:<name>。"
       return 1
     fi
-    echo "导入目标：1) 默认 frpc  2) 命名 frpc 实例"
+    echo "导入目标：1) 默认客户端  2) 其它客户端"
     target="$(ask "请选择" "1")"
   fi
   case "$target" in
@@ -2974,13 +3078,12 @@ import_frps_pairing_code() {
       store_file="$FRPC_STORE"
       service="frpc"
       ;;
-    2|instance)
+    2|client|instance)
       if [[ "$strict_verify" == "true" ]]; then
-        warn "非交互导入命名实例必须使用 instance:<name>。"
+        warn "非交互导入其它客户端必须使用 client:<name>。"
         return 1
       fi
-      name="$(ask_required "实例名" "")"
-      validate_instance_name "$name" || { warn "实例名不合法：$name"; return 0; }
+      name="$(ask_new_frpc_client_name)"
       config="$(instance_frpc_config "$name")"
       split_dir="$(instance_frpc_conf_dir "$name")"
       token_file="$(instance_token_file "$name")"
@@ -2989,9 +3092,9 @@ import_frps_pairing_code() {
       service="$(instance_service_name "$name")"
       write_frpc_template_service
       ;;
-    instance:*)
-      name="${target#instance:}"
-      validate_instance_name "$name" || { warn "实例名不合法：$name"; [[ "$strict_verify" == "true" ]] && return 1; return 0; }
+    client:*|instance:*)
+      name="${target#*:}"
+      validate_instance_name "$name" || { warn "客户端名不合法：$name"; [[ "$strict_verify" == "true" ]] && return 1; return 0; }
       config="$(instance_frpc_config "$name")"
       split_dir="$(instance_frpc_conf_dir "$name")"
       token_file="$(instance_token_file "$name")"
@@ -3026,37 +3129,37 @@ import_frps_pairing_code() {
 
 manage_named_frpc_service_action() {
   local name service
-  name="$(ask_required "实例名" "")"
-  validate_instance_name "$name" || { warn "实例名不合法：$name"; return 0; }
+  choose_existing_frpc_client_name || return 0
+  name="$SELECTED_FRPC_CLIENT_NAME"
   service="$(instance_service_name "$name")"
   manage_single_service_menu "$service"
 }
 
 delete_named_frpc_instance() {
   local name dir service
-  name="$(ask_required "要删除的实例名" "")"
-  validate_instance_name "$name" || { warn "实例名不合法：$name"; return 0; }
+  choose_existing_frpc_client_name || return 0
+  name="$SELECTED_FRPC_CLIENT_NAME"
   dir="$(instance_dir "$name")"
   service="$(instance_service_name "$name")"
-  [[ -d "$dir" ]] || { warn "实例目录不存在：$dir"; return 0; }
-  warn "即将删除实例 ${name}，目录：$dir"
+  [[ -d "$dir" ]] || { warn "客户端目录不存在：$dir"; return 0; }
+  warn "即将删除客户端 ${name}，目录：$dir"
   if confirm "确认继续" "n"; then
     service_action "$service" stop "false"
     service_action "$service" disable "false"
     rm -rf "$dir"
-    ok "已删除实例：$name"
+    ok "已删除客户端：$name"
   fi
 }
 
 manage_frpc_instances_menu() {
   while true; do
-    menu_title "客户端 / 实例"
-    echo "实例目录：$FRPC_CLIENTS_DIR"
-    ui_menu_item 1 "列出实例"
-    ui_menu_item 2 "新建/重配实例"
-    ui_menu_item 3 "从默认 frpc 复制为实例"
+    menu_title "客户端管理 / 客户端列表"
+    echo "客户端目录：$FRPC_CLIENTS_DIR"
+    ui_menu_item 1 "列出客户端"
+    ui_menu_item 2 "新建/重配客户端"
+    ui_menu_item 3 "从默认客户端复制"
     ui_menu_item 4 "服务管理"
-    ui_menu_item 5 "删除实例" "危险操作"
+    ui_menu_item 5 "删除客户端" "危险操作"
     ui_menu_back
     local choice
     choice="$(ask "请选择" "1")"
@@ -3095,12 +3198,12 @@ frps_config_menu() {
 
 frpc_config_menu() {
   while true; do
-    menu_title "客户端 / 配置"
+    menu_title "客户端管理 / 配置文件"
     render_component_status "frpc" "${INSTALL_DIR}/frpc" "$FRPC_CONFIG" "frpc"
-    ui_menu_item 1 "默认 frpc"
-    ui_menu_item 2 "命名实例"
+    ui_menu_item 1 "默认客户端"
+    ui_menu_item 2 "其它客户端"
     ui_menu_back
-    local choice name instances=()
+    local choice name
     choice="$(ask "请选择" "1")"
     case "$choice" in
       1|default|frpc)
@@ -3111,22 +3214,15 @@ frpc_config_menu() {
         frpc_config_target_menu_direct
         ;;
       2|instance)
-        mapfile -t instances < <(list_frpc_instances)
-        if (( ${#instances[@]} == 0 )); then
-          render_no_frpc_instances_hint
-          pause
-          continue
-        fi
-        render_frpc_instance_list
-        name="$(ask_required "实例名" "")"
-        validate_instance_name "$name" || { warn "实例名不合法：$name"; pause; continue; }
+        choose_existing_frpc_client_name || { pause; continue; }
+        name="$SELECTED_FRPC_CLIENT_NAME"
         if [[ ! -f "$(instance_frpc_config "$name")" ]]; then
-          warn "命名 frpc 实例不存在或未完成配置：$(instance_frpc_config "$name")"
-          warn "上面是当前已有实例；要创建新实例，请到 客户端 -> 实例 -> 新建/重配实例，或 客户端 -> 接入码 导入为 instance:${name}。"
+          warn "客户端不存在或未完成配置：$(instance_frpc_config "$name")"
+          warn "上面是当前已有客户端；要创建新客户端，请到 客户端管理 -> 客户端列表 -> 新建/重配客户端，或 新增配置 -> 导入接入码。"
           pause
           continue
         fi
-        SELECTED_FRPC_LABEL="实例 ${name}"
+        SELECTED_FRPC_LABEL="客户端 ${name}"
         SELECTED_FRPC_CONFIG="$(instance_frpc_config "$name")"
         SELECTED_FRPC_SPLIT_DIR="$(instance_frpc_conf_dir "$name")"
         SELECTED_FRPC_SERVICE="$(instance_service_name "$name")"
@@ -3139,8 +3235,8 @@ frpc_config_menu() {
 }
 
 select_existing_frpc_target() {
-  local target name config instances=()
-  echo "选择客户端：1) 默认 frpc  2) 命名 frpc 实例"
+  local target name config
+  echo "选择客户端：1) 默认客户端  2) 其它客户端"
   target="$(ask "请选择" "1")"
   case "$target" in
     1|default|frpc)
@@ -3152,20 +3248,14 @@ select_existing_frpc_target() {
       SELECTED_FRPC_LOG_FILE="${LOG_DIR}/frpc.log"
       ;;
     2|instance)
-      mapfile -t instances < <(list_frpc_instances)
-      if (( ${#instances[@]} == 0 )); then
-        render_no_frpc_instances_hint
-        return 1
-      fi
-      render_frpc_instance_list
-      name="$(ask_required "实例名" "")"
-      validate_instance_name "$name" || { warn "实例名不合法：$name"; return 1; }
+      choose_existing_frpc_client_name || return 1
+      name="$SELECTED_FRPC_CLIENT_NAME"
       config="$(instance_frpc_config "$name")"
       if [[ ! -f "$config" ]]; then
-        warn "命名 frpc 实例不存在或未完成配置：$config"
+        warn "客户端不存在或未完成配置：$config"
         return 1
       fi
-      SELECTED_FRPC_LABEL="实例 ${name}"
+      SELECTED_FRPC_LABEL="客户端 ${name}"
       SELECTED_FRPC_CONFIG="$config"
       SELECTED_FRPC_SPLIT_DIR="$(instance_frpc_conf_dir "$name")"
       SELECTED_FRPC_SERVICE="$(instance_service_name "$name")"
@@ -3176,21 +3266,15 @@ select_existing_frpc_target() {
 }
 
 select_existing_named_frpc_target() {
-  local name config instances=()
-  mapfile -t instances < <(list_frpc_instances)
-  if (( ${#instances[@]} == 0 )); then
-    render_no_frpc_instances_hint
-    return 1
-  fi
-  render_frpc_instance_list
-  name="$(ask_required "实例名" "")"
-  validate_instance_name "$name" || { warn "实例名不合法：$name"; return 1; }
+  local name config
+  choose_existing_frpc_client_name || return 1
+  name="$SELECTED_FRPC_CLIENT_NAME"
   config="$(instance_frpc_config "$name")"
   if [[ ! -f "$config" ]]; then
-    warn "命名 frpc 实例不存在或未完成配置：$config"
+    warn "客户端不存在或未完成配置：$config"
     return 1
   fi
-  SELECTED_FRPC_LABEL="实例 ${name}"
+  SELECTED_FRPC_LABEL="客户端 ${name}"
   SELECTED_FRPC_CONFIG="$config"
   SELECTED_FRPC_SPLIT_DIR="$(instance_frpc_conf_dir "$name")"
   SELECTED_FRPC_SERVICE="$(instance_service_name "$name")"
@@ -3259,14 +3343,11 @@ frps_management_menu() {
 }
 
 render_frpc_menu() {
-  ui_menu_item 1 "安装/更新"
-  ui_menu_item 2 "服务管理" "启动 / 停止 / 重启 / 自启"
-  ui_menu_item 3 "实例" "多 frpc 客户端"
-  ui_menu_item 4 "接入码" "导入 frps 配对码"
-  ui_menu_item 5 "代理配置" "TCP / HTTP / STCP 等"
-  ui_menu_item 6 "XTCP" "打洞配置 / 导入码"
-  ui_menu_item 7 "配置" "查看 / 编辑 / 校验"
-  ui_menu_item 8 "日志"
+  ui_menu_item 1 "安装/更新客户端"
+  ui_menu_item 2 "启动/停止/重启"
+  ui_menu_item 3 "客户端列表"
+  ui_menu_item 4 "配置文件" "查看 / 编辑 / 校验"
+  ui_menu_item 5 "日志"
   ui_menu_back
 }
 
@@ -3282,11 +3363,8 @@ frpc_management_menu() {
       1) install_frpc_flow; pause ;;
       2) manage_single_service_menu frpc; pause ;;
       3) manage_frpc_instances_menu ;;
-      4) import_frps_pairing_code; pause ;;
-      5) add_proxy_wizard; pause ;;
-      6) xtcp_pair_menu ;;
-      7) frpc_config_menu ;;
-      8) show_frpc_log_menu; pause ;;
+      4) frpc_config_menu ;;
+      5) show_frpc_log_menu; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -3439,7 +3517,7 @@ show_token_file() {
 show_frpc_split_configs_for_dir() {
   local dir="$1" reveal="$2" files=() f
   echo
-  echo "========== frpc 拆分代理配置 =========="
+  echo "========== frpc 拆分配置 =========="
   echo "目录：$dir"
   if [[ ! -d "$dir" ]]; then
     warn "目录不存在：$dir"
@@ -3447,7 +3525,7 @@ show_frpc_split_configs_for_dir() {
   fi
   mapfile -d '' -t files < <(find "$dir" -maxdepth 1 -type f -name '*.toml' -print0 2>/dev/null | sort -z)
   if (( ${#files[@]} == 0 )); then
-    warn "没有找到拆分代理配置：${dir}/*.toml"
+    warn "没有找到拆分配置：${dir}/*.toml"
     return 0
   fi
   for f in "${files[@]}"; do
@@ -3572,7 +3650,7 @@ show_log_file() {
   fi
   if [[ ! -s "$file" ]]; then
     warn "日志文件存在但为空：$file"
-    warn "frp 通常在启动、客户端连接、代理访问、错误发生时写日志；没有事件时不会持续刷屏。"
+    warn "frp 通常在启动、客户端连接、访问或错误发生时写日志；没有事件时不会持续刷屏。"
   fi
   if [[ "$follow" == "true" ]]; then
     tail -n "$lines" -F "$file" || true
@@ -3617,7 +3695,7 @@ show_service_log() {
     frpc) file="${LOG_DIR}/frpc.log"; conf="$FRPC_CONFIG" ;;
     frpc@*)
       local instance="${service#frpc@}"
-      validate_instance_name "$instance" || { warn "实例名不合法：$instance"; return 0; }
+      validate_instance_name "$instance" || { warn "客户端名不合法：$instance"; return 0; }
       file="$(instance_log_file "$instance")"
       conf="$(instance_frpc_config "$instance")"
       ;;
@@ -3699,8 +3777,8 @@ fix_log_config_menu() {
   info "一键修复/启用文件日志"
   ui_menu_item 1 "修复 frps 文件日志配置"
   ui_menu_item 2 "修复默认 frpc 文件日志配置"
-  ui_menu_item 3 "修复命名 frpc 实例文件日志配置"
-  ui_menu_item 4 "修复全部" "frps + 默认 frpc + 命名实例"
+  ui_menu_item 3 "修复其它 frpc 客户端文件日志配置"
+  ui_menu_item 4 "修复全部" "frps + 默认 frpc + 其它客户端"
   ui_menu_back
   choice="$(ask "请选择" "4")"
   mkdir -p "$LOG_DIR"
@@ -3793,9 +3871,10 @@ uninstall_frp() {
 }
 
 render_main_menu() {
-  ui_menu_item 1 "服务端 frps" "安装 / 配置 / 接入码 / 日志"
-  ui_menu_item 2 "客户端 frpc" "实例 / 代理 / XTCP / 日志"
-  ui_menu_item 3 "工具/维护" "全局校验 / 摘要 / 日志修复 / 卸载"
+  ui_menu_item 1 "服务端管理" "frps 安装 / 配置 / 接入码 / 日志"
+  ui_menu_item 2 "新增配置" "TCP / UDP / HTTP / XTCP / 导入码"
+  ui_menu_item 3 "客户端管理" "安装 / 启停 / 多客户端 / 配置 / 日志"
+  ui_menu_item 4 "工具/维护" "全局校验 / 摘要 / 日志修复 / 卸载"
   ui_menu_back "退出"
 }
 
@@ -3809,8 +3888,9 @@ main_menu() {
     choice="$(ask "请选择" "1")"
     case "$choice" in
       1) frps_management_menu ;;
-      2) frpc_management_menu ;;
-      3) tools_menu ;;
+      2) add_config_menu ;;
+      3) frpc_management_menu ;;
+      4) tools_menu ;;
       0|q|Q) exit 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -3821,8 +3901,8 @@ print_usage() {
   cat <<EOF_USAGE
 用法：
   bash frp.sh
-  bash frp.sh --import-frps-code <接入码> <解密码> [default|instance:<name>]
-  bash frp.sh --import-xtcp-code <导入码> <解密码> [default|instance:<name>]
+  bash frp.sh --import-frps-code <接入码> <解密码> [default|client:<name>]
+  bash frp.sh --import-xtcp-code <导入码> <解密码> [default|client:<name>]
   bash frp.sh --xtcp-summary <配置文件或目录>
   bash frp.sh --repair-xtcp <配置文件或目录> [quic|kcp] [fallbackTimeoutMs]
   bash frp.sh --service <frps|frpc|frpc@name> <status|start|stop|restart|enable|disable>

@@ -11,16 +11,16 @@
 
 - 一键安装 / 更新 `frps` 服务端和 `frpc` 客户端
 - 彩色菜单和状态栏，`frps` 与 `frpc` 分开管理，入口不重复
-- 支持多个独立 `frpc` 客户端实例
+- 支持多个独立 `frpc` 客户端，自动从 `/etc/frp/clients` 识别
 - 自动获取 frp 最新版本，也可手动指定版本
 - 默认生成 TOML 配置，并使用 `frps/frpc verify -c` 校验
 - `frpc` 默认使用 `auth.tokenSource.file.path`，避免 token 明文写入主配置
 - 支持 `frps/frpc` 启动、停止、重启、自启管理、文件日志、脚本日志
-- 支持编辑 `frps.toml`、`frpc.toml`、`frpc.d/*.toml` 和命名实例配置
+- 支持编辑 `frps.toml`、`frpc.toml`、`frpc.d/*.toml` 和其它客户端配置
 - 编辑配置前自动备份，编辑后可校验并重启服务
 - 支持 `frps` 导出加密接入码，新机器一键导入为 `frpc`
 - 支持 XTCP/STCP 加密导入码，减少两端手工配对出错
-- 支持自定义 frpc 预设、手动代理/访问者、直接粘贴 TOML
+- 支持自定义 frpc 预设、手动配置、直接粘贴 TOML
 - 支持安装摘要查看和完整卸载
 
 ---
@@ -48,18 +48,19 @@ sudo bash frp.sh
 菜单顶部只显示运行概况；版本和配置细节在子菜单和安装摘要里查看：
 
 ```text
-frp 管理脚本 2026.05.28-r24
+frp 管理脚本 2026.06.07-r25
 状态：服务端:未运行 | 客户端:2个/运行1
 ```
 
 ```text
-1) 服务端 frps
-2) 客户端 frpc
-3) 工具/维护
+1) 服务端管理
+2) 新增配置
+3) 客户端管理
+4) 工具/维护
 0) 退出
 ```
 
-配置和日志不再在主菜单重复出现：服务端配置只在“服务端 frps”里，客户端配置只在“客户端 frpc”里。更新二进制、全局校验、安装摘要、GitHub 下载代理、文件日志修复和卸载放在“工具/维护”里。
+新增 TCP/UDP/HTTP/XTCP 走“新增配置”；安装、启停、日志、配置文件、客户端列表走“客户端管理”。更新二进制、全局校验、安装摘要、GitHub 下载代理、文件日志修复和卸载放在“工具/维护”里。
 
 ---
 
@@ -92,21 +93,44 @@ IFRP-FRPC-V1:<加密内容>
 bash <(curl -fsSL 'https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh') --import-frps-code 'IFRP-FRPC-V1:...' '解密码' default
 ```
 
-把一键导入命令发到新机器执行，即可解密并生成默认 `frpc` 配置；要导入为命名实例，把最后的 `default` 改成 `instance:<name>`。
+把一键导入命令发到新机器执行，即可解密并生成默认 `frpc` 配置；高级脚本场景可把最后的 `default` 改成 `client:<name>` 写入指定客户端目录。旧版的 `instance:<name>` 仍兼容。
+
+---
+
+## 新增配置
+
+```text
+1) 新增 TCP 配置
+2) 新增 UDP 配置
+3) 新增 HTTP 配置
+4) 新增 HTTPS 配置
+5) 新增 XTCP 配置
+6) 导入接入码
+7) 更多高级配置
+0) 返回
+```
+
+### 新增 TCP 配置
+
+进入 `新增配置 -> 新增 TCP 配置`，依次填写：
+
+- 名称：例如 `ssh`
+- 本地服务 IP：例如 `127.0.0.1`
+- 本地服务端口：例如 `22`
+- 服务端暴露端口：例如 `6000`
+
+脚本会写入对应客户端的 `frpc.d/<名称>.toml`，校验 `frpc.toml`，并提示是否重启对应客户端。
 
 ---
 
 ## frpc 客户端管理
 
 ```text
-1) 安装/更新
-2) 服务管理
-3) 实例
-4) 接入码
-5) 代理配置
-6) XTCP
-7) 配置
-8) 日志
+1) 安装/更新客户端
+2) 启动/停止/重启
+3) 客户端列表
+4) 配置文件
+5) 日志
 0) 返回
 ```
 
@@ -129,11 +153,11 @@ includes = ["/etc/frp/frpc.d/*.toml"]
 
 ---
 
-## 多 frpc 实例
+## 客户端列表
 
-命名实例适合一台机器同时连接多个不同的 `frps`，或用不同 token、协议、代理目录隔离配置。
+客户端列表适合一台机器同时连接多个不同的 `frps`，或用不同 token、协议、配置目录隔离配置。脚本会自动识别 `/etc/frp/clients/*/frpc.toml`；新建时可以直接回车让脚本自动生成客户端编号。
 
-每个实例独立保存：
+每个客户端独立保存：
 
 ```text
 /etc/frp/clients/<name>/frpc.toml
@@ -142,7 +166,7 @@ includes = ["/etc/frp/frpc.d/*.toml"]
 /var/log/frp/frpc-<name>.log
 ```
 
-已有默认 `frpc` 时，可以在 `客户端 frpc -> 实例 -> 从默认 frpc 复制为实例` 直接生成 `frpc@<name>`。脚本会复制默认主配置、`frpc.d/*.toml`、token 和 store 文件，并把 `includes`、`auth.tokenSource.file.path`、`log.to`、`store.path` 改成实例自己的路径。
+已有默认 `frpc` 时，可以在 `客户端管理 -> 客户端列表 -> 从默认客户端复制` 直接生成一个独立客户端。脚本会复制默认主配置、`frpc.d/*.toml`、token 和 store 文件，并把 `includes`、`auth.tokenSource.file.path`、`log.to`、`store.path` 改成这个客户端自己的路径。
 
 systemd 使用模板服务：
 
@@ -167,8 +191,8 @@ bash frp.sh --service frpc@home restart
 
 服务端和客户端各自管理自己的配置，避免主菜单和子菜单重复：
 
-- 服务端：`服务端 frps -> 配置`，可查看、编辑、校验 `/etc/frp/frps.toml`
-- 客户端：`客户端 frpc -> 配置`，可选择默认 frpc 或命名实例，再查看、编辑、校验主配置和拆分配置
+- 服务端：`服务端管理 -> 配置`，可查看、编辑、校验 `/etc/frp/frps.toml`
+- 客户端：`客户端管理 -> 配置文件`，可选择默认客户端或其它客户端，再查看、编辑、校验主配置和拆分配置
 
 编辑器选择顺序：
 
@@ -183,7 +207,7 @@ frps verify -c /etc/frp/frps.toml
 frpc verify -c /etc/frp/frpc.toml
 ```
 
-命名实例会校验对应的 `/etc/frp/clients/<name>/frpc.toml`。
+其它客户端会校验对应的 `/etc/frp/clients/<name>/frpc.toml`。
 
 ---
 
@@ -222,7 +246,7 @@ disableAssistedAddrs = true
 disableAssistedAddrs = true
 ```
 
-旧配置可以直接在 XTCP 菜单选择“检查/修复现有配置”。脚本会扫描默认 `frpc.d` 或命名实例 `frpc.d` 里的 XTCP 配置，先显示摘要，再备份并把协议保持/改为 `quic`，保留 `keepTunnelOpen = true`，把 `fallbackTimeoutMs` 调到 5000，并按你的选择启用或移除 `disableAssistedAddrs`。
+旧配置可以直接在 XTCP 菜单选择“检查/修复现有配置”。脚本会扫描默认客户端或其它客户端的 `frpc.d` 里的 XTCP 配置，先显示摘要，再备份并把协议保持/改为 `quic`，保留 `keepTunnelOpen = true`，把 `fallbackTimeoutMs` 调到 5000，并按你的选择启用或移除 `disableAssistedAddrs`。
 
 也可以直接用命令查看或修复单个拆分配置，也可以传目录批量处理：
 
@@ -251,7 +275,7 @@ fallbackTimeoutMs = 5000
 /etc/frp/presets.d/
 ```
 
-代理拆分配置目录：
+拆分配置目录：
 
 ```bash
 /etc/frp/frpc.d/
@@ -299,7 +323,7 @@ journalctl -u frps -n 100 --no-pager
 journalctl -u frpc@home -n 100 --no-pager
 ```
 
-脚本里的“全局校验”和“日志修复”会同时处理默认 `frpc` 和命名实例 `frpc@<name>`。
+脚本里的“全局校验”和“日志修复”会同时处理默认 `frpc` 和其它客户端 `frpc@<name>`。
 
 ---
 
@@ -311,15 +335,15 @@ journalctl -u frpc@home -n 100 --no-pager
 
 /etc/frp/frps.toml                     frps 主配置
 /etc/frp/frpc.toml                     默认 frpc 主配置
-/etc/frp/frpc.d/                       默认 frpc 拆分代理配置
-/etc/frp/clients/<name>/               命名 frpc 实例目录
+/etc/frp/frpc.d/                       默认 frpc 拆分配置
+/etc/frp/clients/<name>/               其它 frpc 客户端目录
 /etc/frp/presets.d/                    frpc 自定义预设目录
 /etc/frp/token                         默认 tokenSource 文件
 /etc/frp/installer.env                 脚本配置
 
 /etc/systemd/system/frps.service       frps systemd 服务
 /etc/systemd/system/frpc.service       默认 frpc systemd 服务
-/etc/systemd/system/frpc@.service      命名 frpc 实例模板服务
+/etc/systemd/system/frpc@.service      其它 frpc 客户端模板服务
 ```
 
 ---
@@ -352,8 +376,8 @@ GH_PROXY=https://ghfast.top/ bash frp.sh
 - 不要公开 XTCP/STCP 的 `secretKey`、XTCP 导入码解密码
 - Dashboard / Admin UI 建议只监听 `127.0.0.1`
 - 如果必须公网暴露 Dashboard / Admin UI，请务必使用强密码，并通过防火墙限制来源 IP
-- `frpc.d`、命名实例目录和 `presets.d` 中可能包含敏感信息，请谨慎备份和分享
-- 日志中可能包含域名、IP、代理名等信息，请谨慎公开
+- `frpc.d`、其它客户端目录和 `presets.d` 中可能包含敏感信息，请谨慎备份和分享
+- 日志中可能包含域名、IP、配置名等信息，请谨慎公开
 
 ---
 
