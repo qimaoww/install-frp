@@ -422,6 +422,8 @@ test_frpc_proxy_target_helpers() {
   require_function write_rendered_frpc_config
   require_function render_custom_preset_to_file
   require_function paste_raw_frpc_toml
+  require_function run_frpc_write_action
+  require_function selected_frpc_target_spec
   require_function add_proxy_by_type
   require_function add_proxy_manual_wizard
   require_function add_stcp_sudp_proxy_menu
@@ -443,17 +445,19 @@ test_frpc_proxy_target_helpers() {
 
   assert_contains 'verify_config_interactive "${INSTALL_DIR}/frps" "$FRPS_CONFIG"' <(printf '%s\n' "$frps_menu_body") "frps verify menu catches verify failure"
   assert_contains 'verify_config_interactive "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"' <(printf '%s\n' "$frpc_target_body") "frpc verify menu catches verify failure"
+  assert_contains 'ui_menu_item 2 "新增配置"' <(printf '%s\n' "$frpc_target_body") "selected client config menu exposes add config entry"
+  assert_contains 'add_proxy_wizard "true"' <(printf '%s\n' "$frpc_target_body") "selected client add config reuses current target"
   assert_not_contains 'select_frpc_split_dir_for_write || return 0' <(printf '%s\n' "$add_proxy_body") "proxy wizard does not choose target on entry"
   assert_contains 'ui_menu_item 1 "新增 TCP 配置"' <(printf '%s\n' "$add_proxy_body") "new config menu exposes tcp config entry"
-  assert_contains 'with_frpc_write_target add_proxy_by_type tcp' <(printf '%s\n' "$add_proxy_body") "tcp config entry writes through selected target"
-  assert_contains 'with_frpc_write_target add_proxy_by_type udp' <(printf '%s\n' "$add_proxy_body") "udp config entry writes through selected target"
-  assert_contains 'with_frpc_write_target add_proxy_by_type http' <(printf '%s\n' "$add_proxy_body") "http config entry writes through selected target"
+  assert_contains 'run_frpc_write_action "$target_locked" add_proxy_by_type tcp' <(printf '%s\n' "$add_proxy_body") "tcp config entry writes through target runner"
+  assert_contains 'run_frpc_write_action "$target_locked" add_proxy_by_type udp' <(printf '%s\n' "$add_proxy_body") "udp config entry writes through target runner"
+  assert_contains 'run_frpc_write_action "$target_locked" add_proxy_by_type http' <(printf '%s\n' "$add_proxy_body") "http config entry writes through target runner"
   assert_contains 'xtcp_pair_menu' <(printf '%s\n' "$add_proxy_body") "new config menu exposes xtcp config entry"
   assert_contains 'import_frps_pairing_code' <(printf '%s\n' "$add_proxy_body") "new config menu exposes pairing import"
-  assert_contains 'with_frpc_write_target apply_custom_preset' <(printf '%s\n' "$more_config_body") "more config menu chooses target before applying preset"
+  assert_contains 'run_frpc_write_action "$target_locked" apply_custom_preset' <(printf '%s\n' "$more_config_body") "more config menu writes through target runner"
   assert_contains 'manage_custom_presets_menu' <(printf '%s\n' "$more_config_body") "more config menu manages presets without selecting target"
-  assert_contains 'with_frpc_write_target add_proxy_manual_wizard' <(printf '%s\n' "$more_config_body") "more config menu chooses target before manual write"
-  assert_contains 'with_frpc_write_target paste_raw_frpc_toml' <(printf '%s\n' "$more_config_body") "more config menu chooses target before raw toml write"
+  assert_contains 'run_frpc_write_action "$target_locked" add_proxy_manual_wizard' <(printf '%s\n' "$more_config_body") "more config menu writes manual config through target runner"
+  assert_contains 'run_frpc_write_action "$target_locked" paste_raw_frpc_toml' <(printf '%s\n' "$more_config_body") "more config menu writes raw toml through target runner"
   assert_not_contains 'with_frpc_write_target apply_custom_preset' <(printf '%s\n' "$manage_presets_body") "preset management does not duplicate apply action"
   assert_not_contains 'with_frpc_write_target paste_raw_frpc_toml' <(printf '%s\n' "$manage_presets_body") "preset management does not duplicate raw toml action"
 
@@ -512,6 +516,68 @@ test_frpc_proxy_target_helpers() {
   assert_eq "0" "$write_status" "rendered writer returns success when selected config fails verify"
   assert_contains "verify:${TMP_DIR}/selected-frpc.toml" <(printf '%s\n' "$write_output") "rendered writer verifies selected config"
   assert_not_contains 'restart:frpc@selected' <(printf '%s\n' "$write_output") "rendered writer skips restart after verify failure"
+
+  assert_eq "default" "$(SELECTED_FRPC_SERVICE=frpc selected_frpc_target_spec)" "selected default client target spec"
+  assert_eq "client:home" "$(SELECTED_FRPC_SERVICE=frpc@home selected_frpc_target_spec)" "selected other client target spec"
+
+  local locked_output
+  locked_output="$(
+    (
+      select_frpc_split_dir_for_write() { printf 'unexpected target prompt\n'; return 9; }
+      add_proxy_by_type() { printf 'writer:%s\n' "$1"; }
+      run_frpc_write_action "true" add_proxy_by_type tcp
+    ) 2>&1
+  )"
+  assert_contains 'writer:tcp' <(printf '%s\n' "$locked_output") "locked selected client writer runs directly"
+  assert_not_contains 'unexpected target prompt' <(printf '%s\n' "$locked_output") "locked selected client writer does not ask target again"
+
+  local locked_xtcp_output locked_xtcp_count
+  locked_xtcp_count="${TMP_DIR}/locked-xtcp-ask-count"
+  printf '0' > "$locked_xtcp_count"
+  locked_xtcp_output="$(
+    (
+      SELECTED_FRPC_SERVICE=frpc@home
+      create_dirs_and_user() { :; }
+      pause() { :; }
+      ask() {
+        local ask_count
+        ask_count="$(cat "$locked_xtcp_count")"
+        ask_count=$((ask_count + 1))
+        printf '%s' "$ask_count" > "$locked_xtcp_count"
+        case "$ask_count" in
+          1) printf '5' ;;
+          *) printf '0' ;;
+        esac
+      }
+      xtcp_pair_menu() { printf 'xtcp-target:%s\n' "$1"; }
+      add_proxy_wizard "true"
+    ) 2>&1
+  )"
+  assert_contains 'xtcp-target:client:home' <(printf '%s\n' "$locked_xtcp_output") "locked selected client xtcp menu receives current target"
+
+  local locked_import_output locked_import_count
+  locked_import_count="${TMP_DIR}/locked-import-ask-count"
+  printf '0' > "$locked_import_count"
+  locked_import_output="$(
+    (
+      SELECTED_FRPC_SERVICE=frpc@home
+      create_dirs_and_user() { :; }
+      pause() { :; }
+      ask() {
+        local ask_count
+        ask_count="$(cat "$locked_import_count")"
+        ask_count=$((ask_count + 1))
+        printf '%s' "$ask_count" > "$locked_import_count"
+        case "$ask_count" in
+          1) printf '6' ;;
+          *) printf '0' ;;
+        esac
+      }
+      import_frps_pairing_code() { printf 'import-target:%s\n' "$4"; }
+      add_proxy_wizard "true"
+    ) 2>&1
+  )"
+  assert_contains 'import-target:client:home' <(printf '%s\n' "$locked_import_output") "locked selected client pairing import receives current target"
 
   local tcp_root tcp_output tcp_file
   tcp_root="${TMP_DIR}/tcp-entry"

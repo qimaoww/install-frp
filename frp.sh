@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r25}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r26}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -2285,11 +2285,38 @@ with_frpc_write_target() {
   "$@"
 }
 
+run_frpc_write_action() {
+  local target_locked="$1"
+  shift
+  if [[ "$target_locked" == "true" ]]; then
+    "$@"
+  else
+    with_frpc_write_target "$@"
+  fi
+}
+
+selected_frpc_target_spec() {
+  local service="${SELECTED_FRPC_SERVICE:-frpc}" name
+  case "$service" in
+    frpc|"") printf 'default' ;;
+    frpc@*)
+      name="${service#frpc@}"
+      validate_instance_name "$name" || { warn "客户端名不合法：$name"; return 1; }
+      printf 'client:%s' "$name"
+      ;;
+    *)
+      warn "无法从当前服务识别客户端：$service"
+      return 1
+      ;;
+  esac
+}
+
 create_xtcp_exposed_and_code() {
   create_dirs_and_user
+  local target_spec="${1:-}"
   local server_addr server_port name secret local_ip local_port bind_addr bind_port keep_open fallback
   local fallback_proxy fallback_visitor timeout protocol disable_assisted server_user allow_users passphrase payload code safe_name file
-  select_frpc_split_dir_for_write || return 0
+  select_frpc_split_dir_for_write "$target_spec" || return 0
   server_addr="$(ask_required "导入端连接的 frps 地址/IP/域名" "")"
   server_port="$(ask_port "导入端连接的 frps 端口" "7000")"
   name="$(ask_required "XTCP 配置名 proxyName" "p2p_ssh")"
@@ -2388,8 +2415,8 @@ import_xtcp_code_to_visitor() {
 
 xtcp_config_check_menu() {
   create_dirs_and_user
-  local protocol disable_assisted timeout
-  select_frpc_split_dir_for_write || return 0
+  local target_spec="${1:-}" protocol disable_assisted timeout
+  select_frpc_split_dir_for_write "$target_spec" || return 0
   if ! list_xtcp_config_files "$SELECTED_FRPC_SPLIT_DIR" | grep -q .; then
     warn "没有找到 XTCP 拆分配置：${SELECTED_FRPC_SPLIT_DIR}/*.toml"
     return 0
@@ -2420,6 +2447,7 @@ xtcp_config_check_menu() {
 }
 
 xtcp_pair_menu() {
+  local target_spec="${1:-}"
   while true; do
     menu_title "客户端 / XTCP"
     ui_menu_item 1 "创建被访问端" "生成加密导入码"
@@ -2429,9 +2457,9 @@ xtcp_pair_menu() {
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
-      1) create_xtcp_exposed_and_code; pause ;;
-      2) import_xtcp_code_to_visitor; pause ;;
-      3) xtcp_config_check_menu; pause ;;
+      1) create_xtcp_exposed_and_code "$target_spec"; pause ;;
+      2) import_xtcp_code_to_visitor "" "" "false" "$target_spec"; pause ;;
+      3) xtcp_config_check_menu "$target_spec"; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -2887,6 +2915,7 @@ add_proxy_manual_wizard() {
 }
 
 add_stcp_sudp_proxy_menu() {
+  local target_locked="${1:-false}"
   while true; do
     menu_title "新增配置 / 安全 TCP-UDP"
     ui_menu_item 1 "新增安全 TCP 被访问端" "STCP"
@@ -2897,10 +2926,10 @@ add_stcp_sudp_proxy_menu() {
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
-      1) with_frpc_write_target add_proxy_by_type stcp; pause ;;
-      2) with_frpc_write_target add_proxy_by_type sudp; pause ;;
-      3) with_frpc_write_target add_proxy_by_type stcp-visitor; pause ;;
-      4) with_frpc_write_target add_proxy_by_type sudp-visitor; pause ;;
+      1) run_frpc_write_action "$target_locked" add_proxy_by_type stcp; pause ;;
+      2) run_frpc_write_action "$target_locked" add_proxy_by_type sudp; pause ;;
+      3) run_frpc_write_action "$target_locked" add_proxy_by_type stcp-visitor; pause ;;
+      4) run_frpc_write_action "$target_locked" add_proxy_by_type sudp-visitor; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -2908,6 +2937,7 @@ add_stcp_sudp_proxy_menu() {
 }
 
 add_more_config_menu() {
+  local target_locked="${1:-false}"
   while true; do
     menu_title "新增配置 / 更多高级配置"
     ui_menu_item 1 "新增安全 TCP/UDP 配置" "STCP / SUDP"
@@ -2919,11 +2949,11 @@ add_more_config_menu() {
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
-      1|stcp|sudp) add_stcp_sudp_proxy_menu ;;
-      2|preset) with_frpc_write_target apply_custom_preset; pause ;;
+      1|stcp|sudp) add_stcp_sudp_proxy_menu "$target_locked" ;;
+      2|preset) run_frpc_write_action "$target_locked" apply_custom_preset; pause ;;
       3) manage_custom_presets_menu ;;
-      4|paste) with_frpc_write_target paste_raw_frpc_toml; pause ;;
-      5|manual) with_frpc_write_target add_proxy_manual_wizard; pause ;;
+      4|paste) run_frpc_write_action "$target_locked" paste_raw_frpc_toml; pause ;;
+      5|manual) run_frpc_write_action "$target_locked" add_proxy_manual_wizard; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -2932,6 +2962,7 @@ add_more_config_menu() {
 
 add_proxy_wizard() {
   create_dirs_and_user
+  local target_locked="${1:-false}" target_spec
   while true; do
     menu_title "新增配置"
     ui_menu_item 1 "新增 TCP 配置" "本地端口 -> 服务端端口"
@@ -2945,13 +2976,27 @@ add_proxy_wizard() {
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
-      1|tcp) with_frpc_write_target add_proxy_by_type tcp; pause ;;
-      2|udp) with_frpc_write_target add_proxy_by_type udp; pause ;;
-      3|http) with_frpc_write_target add_proxy_by_type http; pause ;;
-      4|https) with_frpc_write_target add_proxy_by_type https; pause ;;
-      5|xtcp) xtcp_pair_menu ;;
-      6|import|code) import_frps_pairing_code; pause ;;
-      7|more) add_more_config_menu ;;
+      1|tcp) run_frpc_write_action "$target_locked" add_proxy_by_type tcp; pause ;;
+      2|udp) run_frpc_write_action "$target_locked" add_proxy_by_type udp; pause ;;
+      3|http) run_frpc_write_action "$target_locked" add_proxy_by_type http; pause ;;
+      4|https) run_frpc_write_action "$target_locked" add_proxy_by_type https; pause ;;
+      5|xtcp)
+        target_spec=""
+        if [[ "$target_locked" == "true" ]]; then
+          target_spec="$(selected_frpc_target_spec)" || { pause; continue; }
+        fi
+        xtcp_pair_menu "$target_spec"
+        ;;
+      6|import|code)
+        if [[ "$target_locked" == "true" ]]; then
+          target_spec="$(selected_frpc_target_spec)" || { pause; continue; }
+          import_frps_pairing_code "" "" "false" "$target_spec"
+        else
+          import_frps_pairing_code
+        fi
+        pause
+        ;;
+      7|more) add_more_config_menu "$target_locked" ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -2959,7 +3004,7 @@ add_proxy_wizard() {
 }
 
 add_config_menu() {
-  add_proxy_wizard
+  add_proxy_wizard "false"
 }
 
 # ---------- management ----------
@@ -3292,21 +3337,23 @@ frpc_config_target_menu_direct() {
     echo "主配置：$SELECTED_FRPC_CONFIG"
     echo "拆分目录：$SELECTED_FRPC_SPLIT_DIR"
     ui_menu_item 1 "查看配置"
-    ui_menu_item 2 "编辑主配置"
-    ui_menu_item 3 "编辑拆分配置"
-    ui_menu_item 4 "校验配置"
+    ui_menu_item 2 "新增配置"
+    ui_menu_item 3 "编辑主配置"
+    ui_menu_item 4 "编辑拆分配置"
+    ui_menu_item 5 "校验配置"
     ui_menu_back
     local choice
     choice="$(ask "请选择" "1")"
     case "$choice" in
       1|view) show_config_file "$SELECTED_FRPC_CONFIG" "${SELECTED_FRPC_LABEL} 主配置" "true"; show_frpc_split_configs_for_dir "$SELECTED_FRPC_SPLIT_DIR" "true"; pause ;;
-      2|edit-main) edit_config_file "$SELECTED_FRPC_CONFIG" "${SELECTED_FRPC_LABEL} 主配置" "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_SERVICE"; pause ;;
-      3|edit-split)
+      2|add) add_proxy_wizard "true" ;;
+      3|edit-main) edit_config_file "$SELECTED_FRPC_CONFIG" "${SELECTED_FRPC_LABEL} 主配置" "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_SERVICE"; pause ;;
+      4|edit-split)
         choose_frpc_split_config "$SELECTED_FRPC_SPLIT_DIR" || { pause; continue; }
         edit_config_file "$SELECTED_CONFIG_FILE" "${SELECTED_FRPC_LABEL} 拆分配置" "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_SERVICE"
         pause
         ;;
-      4|verify) verify_config_interactive "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"; pause ;;
+      5|verify) verify_config_interactive "${INSTALL_DIR}/frpc" "$SELECTED_FRPC_CONFIG"; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
