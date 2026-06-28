@@ -1642,7 +1642,6 @@ test_install_state_and_status_bar() {
   require_function binary_version_tag
   require_function installed_frp_version
   require_function should_skip_frp_download
-  require_function refresh_existing_systemd_services
   require_function render_component_status
   require_function render_status_bar
   require_function frpc_client_status_counts
@@ -1690,20 +1689,6 @@ EOF_FAKE_FRPC
   should_skip_frp_download "v0.68.1" "n" >/dev/null || fail "same version should skip when reinstall not confirmed"
   ! should_skip_frp_download "v0.69.0" "n" >/dev/null 2>&1 || fail "different version should not skip"
 
-  local refresh_output
-  refresh_output="$(
-    (
-      mkdir -p "${FRPC_CLIENTS_DIR}/home"
-      : > "${FRPC_CLIENTS_DIR}/home/frpc.toml"
-      write_systemd_service() { printf 'service:%s:%s\n' "$1" "$3"; }
-      write_frpc_template_service() { printf 'template-service\n'; }
-      refresh_existing_systemd_services
-    ) 2>&1
-  )"
-  assert_contains "service:frps:${FRPS_CONFIG}" <(printf '%s\n' "$refresh_output") "install update refreshes existing frps service"
-  assert_contains "service:frpc:${FRPC_CONFIG}" <(printf '%s\n' "$refresh_output") "install update refreshes existing frpc service"
-  assert_contains "template-service" <(printf '%s\n' "$refresh_output") "install update refreshes existing frpc template service"
-
   local update_output
   update_output="$(
     (
@@ -1712,11 +1697,14 @@ EOF_FAKE_FRPC
       select_version() { printf 'v0.68.1'; }
       should_skip_frp_download() { return 0; }
       download_and_install_frp() { fail "same-version install update should not download"; }
-      refresh_existing_systemd_services() { printf 'refresh-services\n'; }
+      write_systemd_service() { fail "binary update should not rewrite systemd service"; }
+      write_frpc_template_service() { fail "binary update should not rewrite frpc template service"; }
+      configure_frps() { fail "binary update should not reconfigure frps"; }
+      configure_frpc() { fail "binary update should not reconfigure frpc"; }
       install_or_update_binaries
     ) 2>&1
   )"
-  assert_contains "refresh-services" <(printf '%s\n' "$update_output") "install update refreshes service files after skipping download"
+  assert_not_contains "service:" <(printf '%s\n' "$update_output") "binary update does not rewrite service files after skipping download"
 
   rm -f "${INSTALL_DIR}/frpc"
   ! should_skip_frp_download "v0.68.1" "n" >/dev/null 2>&1 || fail "partial install should not skip download"
@@ -1841,20 +1829,25 @@ EOF_FAKE_FRPC_RESTORE
   local frpc_menu frps_menu
   frpc_menu="$(render_frpc_menu)"
   frps_menu="$(render_frps_menu)"
-  assert_contains '1) 安装/更新客户端' <(printf '%s\n' "$frpc_menu") "client menu has install entry"
+  assert_contains '1) 安装/重配客户端' <(printf '%s\n' "$frpc_menu") "client menu has install entry"
   assert_contains '2) 服务管理' <(printf '%s\n' "$frpc_menu") "client menu exposes service management"
   assert_contains '3) 客户端列表' <(printf '%s\n' "$frpc_menu") "client menu exposes client list management"
   assert_contains '4) 配置文件' <(printf '%s\n' "$frpc_menu") "client menu groups view edit verify config"
   assert_contains '5) 日志' <(printf '%s\n' "$frpc_menu") "client menu exposes logs"
+  assert_contains '6) 更新二进制' <(printf '%s\n' "$frpc_menu") "client menu separates binary update"
   ! printf '%s\n' "$frpc_menu" | grep -Fq '新增配置' || fail "client menu should not contain new config entry"
   ! printf '%s\n' "$frpc_menu" | grep -Fq '代理' || fail "client menu should not use proxy wording"
+  ! printf '%s\n' "$frpc_menu" | grep -Fq '安装/更新' || fail "frpc menu should separate install and update wording"
   ! printf '%s\n' "$frpc_menu" | grep -Fq '9)' || fail "frpc menu should not duplicate separate verify/view entries"
   ! printf '%s\n' "$frpc_menu" | grep -Fq '默认 frpc 客户端' || fail "frpc menu should not repeat long default client text"
   ! printf '%s\n' "$frpc_menu" | grep -Fq 'systemd 服务' || fail "frpc menu should use short service text"
+  assert_contains '1) 安装/重配' <(printf '%s\n' "$frps_menu") "frps menu has install entry"
   assert_contains '2) 服务管理' <(printf '%s\n' "$frps_menu") "frps menu exposes service management"
   assert_contains '3) 接入码' <(printf '%s\n' "$frps_menu") "frps menu has short pairing entry"
   assert_contains '4) 配置' <(printf '%s\n' "$frps_menu") "frps menu groups view edit verify config"
-  ! printf '%s\n' "$frps_menu" | grep -Fq '6)' || fail "frps menu should not duplicate separate verify/view entries"
+  assert_contains '6) 更新二进制' <(printf '%s\n' "$frps_menu") "frps menu separates binary update"
+  ! printf '%s\n' "$frps_menu" | grep -Fq '安装/更新' || fail "frps menu should separate install and update wording"
+  ! printf '%s\n' "$frps_menu" | grep -Fq '7)' || fail "frps menu should not duplicate separate verify/view entries"
   ! declare -F config_management_menu >/dev/null || fail "top-level duplicate config menu should be removed"
   ! declare -F show_logs_menu >/dev/null || fail "top-level duplicate logs menu should be removed"
   ! declare -f curl_download | grep -Fq 'curl -fL ' || fail "curl download should be silent and not show progress meter"

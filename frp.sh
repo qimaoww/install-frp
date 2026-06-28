@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r34}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r35}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -1872,35 +1872,9 @@ install_or_update_binaries() {
   local version
   version="$(select_version)"
   if should_skip_frp_download "$version"; then
-    refresh_existing_systemd_services
     return 0
   fi
   download_and_install_frp "$version"
-  refresh_existing_systemd_services
-}
-
-refresh_existing_systemd_services() {
-  local refreshed=0 instances=""
-
-  if [[ -x "${INSTALL_DIR}/frps" && -f "$FRPS_CONFIG" ]]; then
-    write_systemd_service "frps" "${INSTALL_DIR}/frps" "$FRPS_CONFIG"
-    refreshed=1
-  fi
-
-  if [[ -x "${INSTALL_DIR}/frpc" && -f "$FRPC_CONFIG" ]]; then
-    write_systemd_service "frpc" "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
-    refreshed=1
-  fi
-
-  if [[ -x "${INSTALL_DIR}/frpc" ]]; then
-    instances="$(list_frpc_instances || true)"
-    if [[ -n "$instances" ]]; then
-      write_frpc_template_service
-      refreshed=1
-    fi
-  fi
-
-  (( refreshed == 1 )) && ok "已刷新现有 systemd 服务文件。"
 }
 
 configure_frps() {
@@ -4235,11 +4209,12 @@ frpc_config_target_menu_direct() {
 }
 
 render_frps_menu() {
-  ui_menu_item 1 "安装/更新"
+  ui_menu_item 1 "安装/重配"
   ui_menu_item 2 "服务管理"
   ui_menu_item 3 "接入码"
   ui_menu_item 4 "配置"
   ui_menu_item 5 "日志"
+  ui_menu_item 6 "更新二进制"
   ui_menu_back
 }
 
@@ -4257,6 +4232,7 @@ frps_management_menu() {
       3) export_frps_pairing_code; pause ;;
       4) frps_config_menu ;;
       5) show_service_log frps "200" "false"; pause ;;
+      6) install_or_update_binaries; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -4264,11 +4240,12 @@ frps_management_menu() {
 }
 
 render_frpc_menu() {
-  ui_menu_item 1 "安装/更新客户端"
+  ui_menu_item 1 "安装/重配客户端"
   ui_menu_item 2 "服务管理"
   ui_menu_item 3 "客户端列表"
   ui_menu_item 4 "配置文件"
   ui_menu_item 5 "日志"
+  ui_menu_item 6 "更新二进制"
   ui_menu_back
 }
 
@@ -4286,6 +4263,7 @@ frpc_management_menu() {
       3) manage_frpc_instances_menu ;;
       4) frpc_config_menu ;;
       5) show_frpc_log_menu; pause ;;
+      6) install_or_update_binaries; pause ;;
       0|q|Q) return 0 ;;
       *) warn "无效选择"; pause ;;
     esac
@@ -4295,7 +4273,7 @@ frpc_management_menu() {
 tools_menu() {
   while true; do
     menu_title "工具/维护"
-    ui_menu_item 1 "仅安装/更新二进制"
+    ui_menu_item 1 "更新二进制"
     ui_menu_item 2 "全局校验" "frps + frpc"
     ui_menu_item 3 "安装摘要"
     ui_menu_item 4 "GitHub 下载代理"
