@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r33}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r34}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -1872,9 +1872,35 @@ install_or_update_binaries() {
   local version
   version="$(select_version)"
   if should_skip_frp_download "$version"; then
+    refresh_existing_systemd_services
     return 0
   fi
   download_and_install_frp "$version"
+  refresh_existing_systemd_services
+}
+
+refresh_existing_systemd_services() {
+  local refreshed=0 instances=""
+
+  if [[ -x "${INSTALL_DIR}/frps" && -f "$FRPS_CONFIG" ]]; then
+    write_systemd_service "frps" "${INSTALL_DIR}/frps" "$FRPS_CONFIG"
+    refreshed=1
+  fi
+
+  if [[ -x "${INSTALL_DIR}/frpc" && -f "$FRPC_CONFIG" ]]; then
+    write_systemd_service "frpc" "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
+    refreshed=1
+  fi
+
+  if [[ -x "${INSTALL_DIR}/frpc" ]]; then
+    instances="$(list_frpc_instances || true)"
+    if [[ -n "$instances" ]]; then
+      write_frpc_template_service
+      refreshed=1
+    fi
+  fi
+
+  (( refreshed == 1 )) && ok "已刷新现有 systemd 服务文件。"
 }
 
 configure_frps() {

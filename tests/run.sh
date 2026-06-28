@@ -1642,6 +1642,7 @@ test_install_state_and_status_bar() {
   require_function binary_version_tag
   require_function installed_frp_version
   require_function should_skip_frp_download
+  require_function refresh_existing_systemd_services
   require_function render_component_status
   require_function render_status_bar
   require_function frpc_client_status_counts
@@ -1688,6 +1689,35 @@ EOF_FAKE_FRPC
   assert_eq "v0.68.1" "$(installed_frp_version)" "installed pair version detected"
   should_skip_frp_download "v0.68.1" "n" >/dev/null || fail "same version should skip when reinstall not confirmed"
   ! should_skip_frp_download "v0.69.0" "n" >/dev/null 2>&1 || fail "different version should not skip"
+
+  local refresh_output
+  refresh_output="$(
+    (
+      mkdir -p "${FRPC_CLIENTS_DIR}/home"
+      : > "${FRPC_CLIENTS_DIR}/home/frpc.toml"
+      write_systemd_service() { printf 'service:%s:%s\n' "$1" "$3"; }
+      write_frpc_template_service() { printf 'template-service\n'; }
+      refresh_existing_systemd_services
+    ) 2>&1
+  )"
+  assert_contains "service:frps:${FRPS_CONFIG}" <(printf '%s\n' "$refresh_output") "install update refreshes existing frps service"
+  assert_contains "service:frpc:${FRPC_CONFIG}" <(printf '%s\n' "$refresh_output") "install update refreshes existing frpc service"
+  assert_contains "template-service" <(printf '%s\n' "$refresh_output") "install update refreshes existing frpc template service"
+
+  local update_output
+  update_output="$(
+    (
+      install_dependencies() { :; }
+      create_dirs_and_user() { :; }
+      select_version() { printf 'v0.68.1'; }
+      should_skip_frp_download() { return 0; }
+      download_and_install_frp() { fail "same-version install update should not download"; }
+      refresh_existing_systemd_services() { printf 'refresh-services\n'; }
+      install_or_update_binaries
+    ) 2>&1
+  )"
+  assert_contains "refresh-services" <(printf '%s\n' "$update_output") "install update refreshes service files after skipping download"
+
   rm -f "${INSTALL_DIR}/frpc"
   ! should_skip_frp_download "v0.68.1" "n" >/dev/null 2>&1 || fail "partial install should not skip download"
   cat > "${INSTALL_DIR}/frpc" <<'EOF_FAKE_FRPC_RESTORE'
