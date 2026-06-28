@@ -722,6 +722,8 @@ test_import_targets_and_safe_failures() {
   require_function import_xtcp_code_to_visitor
   require_function service_action
   require_function systemctl_enable_restart
+  require_function write_service_unit_for_service
+  require_function delete_service_unit_for_service
   require_function restart_service_if_present
   require_function activate_frpc_service_after_import
 
@@ -916,6 +918,36 @@ test_import_targets_and_safe_failures() {
   )"
   assert_contains 'enable-restart:frpc' <(printf '%s\n' "$menu_restart_output") "service menu restart enables autostart"
   assert_not_contains 'service:frpc:restart' <(printf '%s\n' "$menu_restart_output") "service menu restart does not only restart service"
+
+  local menu_enable_output menu_disable_output
+  menu_enable_output="$(
+    (
+      has_cmd() { [[ "$1" == "systemctl" ]]; }
+      service_exists() { return 1; }
+      print_service_summary() { :; }
+      write_service_unit_for_service() { SERVICE_ACTION_STATUS=0; printf 'write-unit:%s\n' "$1"; }
+      service_action() { printf 'service:%s:%s\n' "$1" "$2"; }
+      ask() { printf '6'; }
+      manage_single_service_menu frpc
+    ) 2>&1
+  )"
+  assert_contains 'write-unit:frpc' <(printf '%s\n' "$menu_enable_output") "service menu autostart writes service unit"
+  assert_contains 'service:frpc:enable' <(printf '%s\n' "$menu_enable_output") "service menu autostart enables service"
+  assert_not_contains '请先安装/写入' <(printf '%s\n' "$menu_enable_output") "service menu can add missing service unit"
+
+  menu_disable_output="$(
+    (
+      has_cmd() { [[ "$1" == "systemctl" ]]; }
+      service_exists() { return 0; }
+      print_service_summary() { :; }
+      delete_service_unit_for_service() { printf 'delete-unit:%s\n' "$1"; }
+      service_action() { printf 'service:%s:%s\n' "$1" "$2"; }
+      ask() { printf '7'; }
+      manage_single_service_menu frpc
+    ) 2>&1
+  )"
+  assert_contains 'delete-unit:frpc' <(printf '%s\n' "$menu_disable_output") "service menu cancel autostart deletes service unit"
+  assert_not_contains 'service:frpc:disable' <(printf '%s\n' "$menu_disable_output") "service menu cancel autostart delegates disable to delete helper"
 
   (
     has_cmd() { [[ "$1" == "systemctl" ]]; }

@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r35}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.06.07-r36}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/qimaoww/install-frp/main/frp.sh}"
 FRP_REPO="${FRP_REPO:-fatedier/frp}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -1019,6 +1019,88 @@ service_action() {
       fi
       ;;
   esac
+}
+
+service_unit_file_path() {
+  local service="$1"
+  case "$service" in
+    frps|frpc)
+      printf '/etc/systemd/system/%s.service' "$service"
+      ;;
+    frpc@*)
+      printf '/etc/systemd/system/frpc@.service'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+write_service_unit_for_service() {
+  local service="$1" instance config
+  SERVICE_ACTION_STATUS=0
+  case "$service" in
+    frps)
+      if [[ ! -x "${INSTALL_DIR}/frps" || ! -f "$FRPS_CONFIG" ]]; then
+        SERVICE_ACTION_STATUS=1
+        warn "缺少 ${INSTALL_DIR}/frps 或 $FRPS_CONFIG，无法写入 frps.service。"
+        return 0
+      fi
+      write_systemd_service "frps" "${INSTALL_DIR}/frps" "$FRPS_CONFIG"
+      ;;
+    frpc)
+      if [[ ! -x "${INSTALL_DIR}/frpc" || ! -f "$FRPC_CONFIG" ]]; then
+        SERVICE_ACTION_STATUS=1
+        warn "缺少 ${INSTALL_DIR}/frpc 或 $FRPC_CONFIG，无法写入 frpc.service。"
+        return 0
+      fi
+      write_systemd_service "frpc" "${INSTALL_DIR}/frpc" "$FRPC_CONFIG"
+      ;;
+    frpc@*)
+      instance="${service#frpc@}"
+      if ! validate_instance_name "$instance"; then
+        SERVICE_ACTION_STATUS=1
+        warn "无效客户端名称：$instance"
+        return 0
+      fi
+      config="$(instance_frpc_config "$instance")"
+      if [[ ! -x "${INSTALL_DIR}/frpc" || ! -f "$config" ]]; then
+        SERVICE_ACTION_STATUS=1
+        warn "缺少 ${INSTALL_DIR}/frpc 或 $config，无法写入 frpc@.service。"
+        return 0
+      fi
+      write_frpc_template_service
+      ;;
+    *)
+      SERVICE_ACTION_STATUS=1
+      warn "不支持写入服务：$service"
+      ;;
+  esac
+}
+
+delete_service_unit_for_service() {
+  local service="$1" unit
+  SERVICE_ACTION_STATUS=0
+  if ! has_cmd systemctl; then
+    SERVICE_ACTION_STATUS=1
+    warn "当前系统没有 systemctl，无法删除 ${service}.service。"
+    return 0
+  fi
+  service_action "$service" disable "false"
+  unit="$(service_unit_file_path "$service" || true)"
+  if [[ -z "$unit" ]]; then
+    SERVICE_ACTION_STATUS=1
+    warn "不支持删除服务：$service"
+    return 0
+  fi
+  if [[ -e "$unit" ]]; then
+    rm -f "$unit"
+    ok "已删除 systemd 服务文件：$unit"
+  else
+    warn "服务文件不存在：$unit"
+  fi
+  systemctl daemon-reload || warn "systemctl daemon-reload 失败，请手动执行。"
+  print_service_summary "$service"
 }
 
 restart_service_if_present() {
@@ -4304,8 +4386,7 @@ manage_single_service_menu() {
   menu_title "${svc} 服务管理"
   print_service_summary "$svc"
   if ! service_exists "$svc"; then
-    warn "请先安装/写入 ${svc}.service。"
-    return 0
+    warn "当前未安装 ${svc}.service，可选择“开机自启”重新添加。"
   fi
   ui_menu_item 1 "状态"
   ui_menu_item 2 "启动并自启"
@@ -4322,8 +4403,13 @@ manage_single_service_menu() {
     3|stop) service_action "$svc" stop ;;
     4|restart) systemctl_enable_restart "$svc" ;;
     5|logs) service_action "$svc" logs ;;
-    6|enable) service_action "$svc" enable ;;
-    7|disable) service_action "$svc" disable ;;
+    6|enable)
+      write_service_unit_for_service "$svc"
+      if (( ${SERVICE_ACTION_STATUS:-1} == 0 )); then
+        service_action "$svc" enable
+      fi
+      ;;
+    7|disable) delete_service_unit_for_service "$svc" ;;
     0|q|Q) return 0 ;;
     *) warn "无效选择" ;;
   esac
