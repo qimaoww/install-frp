@@ -114,6 +114,7 @@ test_frpc_base_config_renderer() {
     "true"
 
   assert_contains 'serverAddr = "frps.example.com"' "$config_path" "server address rendered"
+  assert_contains 'loginFailExit = false' "$config_path" "frpc keeps retrying login after disconnect"
   assert_contains 'includes = ["'"$split_dir"'/*.toml"]' "$config_path" "split include rendered"
   assert_contains 'auth.tokenSource.type = "file"' "$config_path" "token source type rendered"
   assert_contains 'auth.tokenSource.file.path = "'"$token_path"'"' "$config_path" "token source path rendered"
@@ -172,6 +173,7 @@ test_named_instance_lifecycle_helpers() {
   render_frpc_template_service > "$service_path"
   assert_contains 'Description=frp client %i service' "$service_path" "template description"
   assert_contains 'ExecStart='"${INSTALL_DIR}"'/frpc -c '"${FRPC_CLIENTS_DIR}"'/%i/frpc.toml' "$service_path" "template execstart"
+  assert_contains 'Restart=always' "$service_path" "template service always restarts frpc"
 
   local migrate_root="${TMP_DIR}/copy-default" copy_output instance_config instance_split instance_token instance_store instance_log
   migrate_root="${TMP_DIR}/copy-default"
